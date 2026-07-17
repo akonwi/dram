@@ -1,0 +1,349 @@
+use ard/testing
+use ard/unsafe as ard_unsafe
+
+use dram/context as request_context
+use dram/dram
+
+struct ValueKey {
+  id: Int,
+}
+
+fn str_value(request: dram::Request, key: ValueKey) Str? {
+  match request_context::value(request.context(), key) {
+    boxed => ard_unsafe::cast<Str>(boxed),
+    _ => Maybe::new(),
+  }
+}
+
+test fn exact_route_uses_captured_dependency_and_middleware() Void!Str {
+  let greeting = "Hello"
+  mut app = dram::App::new()
+  app.use_middleware(
+    fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
+      response.header("X-Middleware", "before")
+      next.run(request, response)
+      response.header("X-After", "yes")
+      response.body = "{Str::from(response.body)} outer".bytes()
+    },
+  )
+  app.use_middleware(
+    fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
+      next.run(request, response)
+      response.body = "{Str::from(response.body)} inner".bytes()
+    },
+  )
+  app.get(
+    "/hello",
+    fn(request: dram::Request, response: mut dram::Response) {
+      response.text(200, "{greeting}, Dram!")
+    },
+  )
+
+  let response = app.handle(dram::Request::new("GET", "/hello"))
+  try testing::assert(response.status == 200, "GET route did not return 200")
+  try testing::assert(
+    Str::from(response.body) == "Hello, Dram! inner outer",
+    "middleware did not wrap the route: {Str::from(response.body)}",
+  )
+  try testing::assert(response.headers.get("X-Middleware").or("") == "before", "before header missing")
+  try testing::assert(response.headers.get("X-After").or("") == "yes", "after header missing")
+  testing::pass()
+}
+
+test fn middleware_runs_for_not_found_and_method_not_allowed() Void!Str {
+  mut app = dram::App::new()
+  app.use_middleware(
+    fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
+      response.header("X-Middleware", "yes")
+      next.run(request, response)
+    },
+  )
+  app.get(
+    "/known",
+    fn(request: dram::Request, response: mut dram::Response) {
+      response.text(200, "known")
+    },
+  )
+
+  let missing = app.handle(dram::Request::new("GET", "/missing"))
+  try testing::assert(missing.status == 404, "missing path did not return 404")
+  try testing::assert(missing.headers.get("X-Middleware").or("") == "yes", "middleware skipped 404")
+
+  let wrong_method = app.handle(dram::Request::new("POST", "/known"))
+  try testing::assert(wrong_method.status == 405, "wrong method did not return 405")
+  try testing::assert(wrong_method.headers.get("Allow").or("") == "GET, HEAD", "Allow header changed")
+  try testing::assert(wrong_method.headers.get("X-Middleware").or("") == "yes", "middleware skipped 405")
+  testing::pass()
+}
+
+test fn middleware_short_circuits_by_omitting_next() Void!Str {
+  mut app = dram::App::new()
+  app.use_middleware(
+    fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
+      response.text(401, "Unauthorized")
+    },
+  )
+  app.get(
+    "/private",
+    fn(request: dram::Request, response: mut dram::Response) {
+      response.text(200, "should not run")
+    },
+  )
+
+  let response = app.handle(dram::Request::new("GET", "/private"))
+  try testing::assert(response.status == 401, "short circuit did not preserve middleware status")
+  try testing::assert(Str::from(response.body) == "Unauthorized", "short-circuited route still ran")
+  testing::pass()
+}
+
+test fn context_values_propagate_without_key_collisions() Void!Str {
+  let first_key = ValueKey{id: 1}
+  let second_key = ValueKey{id: 2}
+  mut app = dram::App::new()
+  app.use_middleware(
+    fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
+      let derived = request_context::with_value(request.context(), first_key, "first")
+      next.run(request.with_context(derived), response)
+    },
+  )
+  app.get(
+    "/values",
+    fn(request: dram::Request, response: mut dram::Response) {
+      let first = str_value(request, first_key).or("missing")
+      let second = str_value(request, second_key).or("missing")
+      response.text(200, "{request.path}:{first}:{second}")
+    },
+  )
+
+  let response = app.handle(dram::Request::new("GET", "/values"))
+  try testing::assert(
+    Str::from(response.body) == "/values:first:missing",
+    "context value or request propagation failed",
+  )
+  testing::pass()
+}
+
+test fn in_memory_context_uses_background_semantics() Void!Str {
+  mut app = dram::App::new()
+  app.get(
+    "/context",
+    fn(request: dram::Request, response: mut dram::Response) {
+      let ctx = request.context()
+      let done: Receiver<Void> = request_context::done(ctx)
+      let context_error = request_context::err(ctx)
+      response.header("X-Cancelled", context_error.is_some().to_str())
+      response.header("X-Error", context_error.or("none"))
+      response.header("X-Deadline", request_context::deadline(ctx).is_some().to_str())
+      response.text(200, "context")
+    },
+  )
+  let response = app.handle(dram::Request::new("GET", "/context"))
+  try testing::assert(response.headers.get("X-Cancelled").or("") == "false", "background was cancelled")
+  try testing::assert(response.headers.get("X-Error").or("") == "none", "background had an error")
+  try testing::assert(response.headers.get("X-Deadline").or("") == "false", "background had a deadline")
+  testing::pass()
+}
+
+test fn post_can_read_headers_and_return_buffered_bytes() Void!Str {
+  mut app = dram::App::new()
+  app.post(
+    "/echo",
+    fn(request: dram::Request, response: mut dram::Response) {
+      response.header("X-Seen", request.header("X-Test").or("missing"))
+      response.bytes(201, request.body)
+    },
+  )
+  mut headers = dram::Headers::new()
+  headers.set("x-test", "present")
+  mut request = dram::Request::new("POST", "/echo")
+  request.headers = headers
+  request.body = "bytes".bytes()
+
+  let response = app.handle(request)
+  try testing::assert(response.status == 201, "POST route did not return 201")
+  try testing::assert(Str::from(response.body) == "bytes", "byte response changed")
+  try testing::assert(response.headers.get("X-Seen").or("") == "present", "request header missing")
+  try testing::assert(
+    response.headers.get("Content-Type").or("") == "application/octet-stream",
+    "byte response content type changed",
+  )
+  testing::pass()
+}
+
+test fn headers_preserve_repeated_values_and_own_framing() Void!Str {
+  mut headers = dram::Headers::new()
+  headers.add("set-cookie", "a=1")
+  headers.add("Set-Cookie", "b=2")
+  try testing::assert(headers.values("SET-COOKIE").size() == 2, "repeated values collapsed")
+
+  mut app = dram::App::new()
+  app.get(
+    "/framing",
+    fn(request: dram::Request, response: mut dram::Response) {
+      response.header("Content-Length", "1")
+      response.header("Transfer-Encoding", "chunked")
+      response.header("Trailer", "X-Later")
+      response.status = 200
+      response.body = "hello".bytes()
+    },
+  )
+  let response = app.handle(dram::Request::new("GET", "/framing"))
+  try testing::assert(response.headers.get("Content-Length").or("") == "5", "content length not replaced")
+  try testing::assert(response.headers.get("Transfer-Encoding").is_none(), "transfer encoding retained")
+  try testing::assert(response.headers.get("Trailer").is_none(), "trailer retained")
+  testing::pass()
+}
+
+test fn header_values_reject_controls_but_allow_htab() Void!Str {
+  mut headers = dram::Headers::new()
+  headers.set("X-Tab", "left\tright")
+  try testing::assert(headers.get("x-tab").or("") == "left\tright", "HTAB was rejected")
+  let invalid = unsafe {
+    headers.set("X-Control", "bad\x01value")
+  }
+  try testing::assert(invalid.is_err(), "control character was accepted")
+  testing::pass()
+}
+
+test fn body_limit_returns_413_before_dispatch() Void!Str {
+  mut app = dram::App::new()
+  app.set_max_body_bytes(4)
+  app.post(
+    "/upload",
+    fn(request: dram::Request, response: mut dram::Response) {
+      response.text(200, "should not run")
+    },
+  )
+  mut request = dram::Request::new("POST", "/upload")
+  request.body = "large".bytes()
+
+  let response = app.handle(request)
+  try testing::assert(response.status == 413, "oversized request did not return 413")
+  testing::pass()
+}
+
+test fn head_falls_back_to_get_and_prefers_explicit_head() Void!Str {
+  mut app = dram::App::new()
+  app.get(
+    "/resource",
+    fn(request: dram::Request, response: mut dram::Response) {
+      response.header("X-Handler", "GET")
+      response.text(200, "get body")
+    },
+  )
+  let fallback = app.handle(dram::Request::new("HEAD", "/resource"))
+  try testing::assert(fallback.status == 200 and fallback.body.size() == 0, "HEAD fallback failed")
+  try testing::assert(fallback.headers.get("Content-Length").or("") == "8", "HEAD length changed")
+
+  app.head(
+    "/resource",
+    fn(request: dram::Request, response: mut dram::Response) {
+      response.header("X-Handler", "HEAD")
+      response.text(202, "head body")
+    },
+  )
+  let explicit = app.handle(dram::Request::new("HEAD", "/resource"))
+  try testing::assert(explicit.status == 202 and explicit.body.size() == 0, "explicit HEAD failed")
+  try testing::assert(explicit.headers.get("X-Handler").or("") == "HEAD", "explicit HEAD not preferred")
+  testing::pass()
+}
+
+test fn finalization_rejects_unsupported_statuses_and_connect() Void!Str {
+  mut app = dram::App::new()
+  app.get(
+    "/reset",
+    fn(request: dram::Request, response: mut dram::Response) {
+      response.text(205, "suppressed")
+    },
+  )
+  app.get(
+    "/informational",
+    fn(request: dram::Request, response: mut dram::Response) {
+      response.text(103, "unsupported")
+    },
+  )
+  app.route(
+    "CONNECT",
+    "/tunnel",
+    fn(request: dram::Request, response: mut dram::Response) {
+      response.text(200, "buffered tunnel")
+    },
+  )
+  let reset = app.handle(dram::Request::new("GET", "/reset"))
+  try testing::assert(reset.status == 205 and reset.body.size() == 0, "205 body retained")
+  let informational = app.handle(dram::Request::new("GET", "/informational"))
+  try testing::assert(informational.status == 500, "1xx final status accepted")
+  let connect = app.handle(dram::Request::new("CONNECT", "/tunnel"))
+  try testing::assert(connect.status == 500, "buffered CONNECT accepted")
+  testing::pass()
+}
+
+test fn custom_methods_and_duplicate_validation() Void!Str {
+  mut app = dram::App::new()
+  app.route(
+    "M-SEARCH",
+    "/discover",
+    fn(request: dram::Request, response: mut dram::Response) {
+      response.text(200, "found")
+    },
+  )
+  try testing::assert(
+    app.handle(dram::Request::new("M-SEARCH", "/discover")).status == 200,
+    "custom failed",
+  )
+  try testing::assert(
+    app.handle(dram::Request::new("m-search", "/discover")).status == 405,
+    "case changed",
+  )
+  let duplicate = unsafe {
+    app.route("M-SEARCH", "/discover", fn(request: dram::Request, response: mut dram::Response) {})
+  }
+  try testing::assert(duplicate.is_err(), "duplicate route did not panic")
+  testing::pass()
+}
+
+test fn next_is_one_shot() Void!Str {
+  mut app = dram::App::new()
+  app.use_middleware(
+    fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
+      next.run(request, response)
+      next.run(request, response)
+    },
+  )
+  app.get(
+    "/once",
+    fn(request: dram::Request, response: mut dram::Response) {
+      response.body = "{Str::from(response.body)}route".bytes()
+      response.status = 200
+    },
+  )
+  let response = app.handle(dram::Request::new("GET", "/once"))
+  try testing::assert(Str::from(response.body) == "route", "Next replayed the route")
+  testing::pass()
+}
+
+test fn listen_rejects_invalid_ports_before_binding() Void!Str {
+  let app = dram::App::new()
+  match app.listen(-1) {
+    ok => testing::fail("negative port unexpectedly listened"),
+    err(message) => testing::assert(message == "port must be between 0 and 65535", "error changed"),
+  }
+}
+
+test fn panic_replaces_partial_response() Void!Str {
+  mut app = dram::App::new()
+  app.get(
+    "/panic",
+    fn(request: dram::Request, response: mut dram::Response) {
+      response.status = 204
+      response.header("X-Partial", "secret")
+      response.body = "sensitive".bytes()
+      panic("boom")
+    },
+  )
+  let response = app.handle(dram::Request::new("GET", "/panic"))
+  try testing::assert(response.status == 500, "panic was not recovered")
+  try testing::assert(Str::from(response.body) == "Internal Server Error", "partial body retained")
+  try testing::assert(response.headers.get("X-Partial").is_none(), "partial headers retained")
+  testing::pass()
+}

@@ -1,0 +1,528 @@
+use ard/unsafe
+
+use go:context as go_context
+use dram/context as request_context
+use go:io
+use go:net
+use go:net/http
+use go:net/textproto
+use go:strconv
+use go:strings
+use go:time
+
+let DEFAULT_MAX_BODY_BYTES = 1048576
+let DEFAULT_MAX_HEADER_BYTES = 1048576
+
+struct Headers {
+  entries: mut [Str: [Str]],
+}
+
+fn Headers::new() Headers {
+  mut entries: [Str: [Str]] = [:]
+  Headers{entries: entries}
+}
+
+impl Headers {
+  fn get(name: Str) Str? {
+    self.values(name).at(0)
+  }
+
+  fn values(name: Str) [Str] {
+    let key = textproto::CanonicalMIMEHeaderKey(name)
+    let stored: [Str] = self.entries.get(key).or([])
+    mut copied: [Str] = []
+    for value in stored {
+      copied.push(value)
+    }
+    copied
+  }
+
+  fn names() [Str] {
+    let stored = self.entries.keys()
+    mut copied: [Str] = []
+    for name in stored {
+      copied.push(name)
+    }
+    copied
+  }
+
+  fn mut set(name: Str, value: Str) {
+    validate_header(name, value)
+    self.entries.set(textproto::CanonicalMIMEHeaderKey(name), [value])
+  }
+
+  fn mut add(name: Str, value: Str) {
+    validate_header(name, value)
+    let key = textproto::CanonicalMIMEHeaderKey(name)
+    mut values: [Str] = self.entries.get(key).or([])
+    values.push(value)
+    self.entries.set(key, values)
+  }
+
+  fn mut remove(name: Str) {
+    self.entries.delete(textproto::CanonicalMIMEHeaderKey(name))
+  }
+}
+
+struct Request {
+  method: Str,
+  path: Str,
+  headers: Headers,
+  body: [Byte],
+  context: go_context::Context,
+}
+
+fn Request::new(method: Str, path: Str) Request {
+  make_request(method, path, Headers::new(), [], request_context::background())
+}
+
+impl Request {
+  fn header(name: Str) Str? {
+    self.headers.get(name)
+  }
+
+  fn context() go_context::Context {
+    self.context
+  }
+
+  fn with_context(context: go_context::Context) Request {
+    make_request(self.method, self.path, self.headers, self.body, context)
+  }
+}
+
+struct Response {
+  status: Int,
+  headers: Headers,
+  body: [Byte],
+}
+
+fn Response::new() Response {
+  Response{
+    status: 404,
+    headers: Headers::new(),
+    body: [],
+  }
+}
+
+impl Response {
+  fn mut header(name: Str, value: Str) {
+    self.headers.set(name, value)
+  }
+
+  fn mut add_header(name: Str, value: Str) {
+    self.headers.add(name, value)
+  }
+
+  fn mut text(status: Int, body: Str) {
+    self.status = status
+    self.headers.set("Content-Type", "text/plain; charset=utf-8")
+    self.body = body.bytes()
+  }
+
+  fn mut bytes(status: Int, body: [Byte]) {
+    self.data(status, "application/octet-stream", body)
+  }
+
+  fn mut data(status: Int, content_type: Str, body: [Byte]) {
+    self.status = status
+    self.headers.set("Content-Type", content_type)
+    self.body = body
+  }
+}
+
+type Handler = fn(Request, mut Response)
+type Middleware = fn(Request, mut Response, Next)
+
+private struct NextState {
+  callback: fn(Request, mut Response),
+  ran: Bool,
+}
+
+private struct NextStore {
+  state: mut NextState,
+}
+
+struct Next {
+  store: Any,
+}
+
+impl Next {
+  fn run(request: Request, response: mut Response) {
+    let store = unsafe::cast<NextStore>(self.store).expect("invalid internal middleware continuation")
+    if not store.state.ran {
+      store.state.ran = true
+      store.state.callback(request, response)
+    }
+  }
+}
+
+private struct Route {
+  method: Str,
+  path: Str,
+  handler: Handler,
+}
+
+struct App {
+  middleware_handlers: [Middleware],
+  routes: [Route],
+  max_body_bytes: Int,
+}
+
+private struct ServerHandler {
+  callback: fn(http::ResponseWriter, mut http::Request),
+}
+
+impl http::Handler for ServerHandler {
+  fn serve_h_t_t_p(writer: http::ResponseWriter, raw_request: mut http::Request) {
+    self.callback(writer, raw_request)
+  }
+}
+
+fn App::new() App {
+  let middleware_handlers: [Middleware] = []
+  let routes: [Route] = []
+  App{
+    middleware_handlers: middleware_handlers,
+    routes: routes,
+    max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+  }
+}
+
+impl App {
+  fn mut set_max_body_bytes(max_body_bytes: Int) {
+    if max_body_bytes < 0 {
+      panic("max body bytes cannot be negative")
+    }
+    self.max_body_bytes = max_body_bytes
+  }
+
+  fn mut use_middleware(middleware: Middleware) {
+    self.middleware_handlers.push(middleware)
+  }
+
+  fn mut route(method: Str, path: Str, handler: Handler) {
+    validate_route(method, path)
+    for existing in self.routes {
+      if existing.method == method and existing.path == path {
+        panic("duplicate route: {method} {path}")
+      }
+    }
+    self.routes.push(
+      Route{
+        method: method,
+        path: path,
+        handler: handler,
+      },
+    )
+  }
+
+  fn mut get(path: Str, handler: Handler) {
+    self.route("GET", path, handler)
+  }
+
+  fn mut head(path: Str, handler: Handler) {
+    self.route("HEAD", path, handler)
+  }
+
+  fn mut post(path: Str, handler: Handler) {
+    self.route("POST", path, handler)
+  }
+
+  fn mut put(path: Str, handler: Handler) {
+    self.route("PUT", path, handler)
+  }
+
+  fn mut patch(path: Str, handler: Handler) {
+    self.route("PATCH", path, handler)
+  }
+
+  fn mut delete(path: Str, handler: Handler) {
+    self.route("DELETE", path, handler)
+  }
+
+  fn mut options(path: Str, handler: Handler) {
+    self.route("OPTIONS", path, handler)
+  }
+
+  fn mut trace(path: Str, handler: Handler) {
+    self.route("TRACE", path, handler)
+  }
+
+  fn handle(request: Request) Response {
+    handle_bounded(self.middleware_handlers, self.routes, self.max_body_bytes, request)
+  }
+
+  fn listen(port: Int, host: Str?) Void!Str {
+    if port < 0 or port > 65535 {
+      Result::err("port must be between 0 and 65535")
+    } else {
+      let address = net::JoinHostPort(host.or("127.0.0.1"), strconv::Itoa(port))
+      mut middleware_handlers: [Middleware] = []
+      for middleware in self.middleware_handlers {
+        middleware_handlers.push(middleware)
+      }
+      mut routes: [Route] = []
+      for route in self.routes {
+        routes.push(route)
+      }
+      let max_body_bytes = self.max_body_bytes
+      let handler: http::Handler = ServerHandler{
+        callback: fn(writer: http::ResponseWriter, raw_request: mut http::Request) {
+          serve_http(middleware_handlers, routes, max_body_bytes, writer, raw_request)
+        },
+      }
+      mut server = http::Server{}
+      server.Addr = address
+      server.Handler = handler
+      server.ReadHeaderTimeout = 5 * time::Second
+      server.ReadTimeout = 30 * time::Second
+      server.WriteTimeout = 30 * time::Second
+      server.IdleTimeout = 120 * time::Second
+      server.MaxHeaderBytes = DEFAULT_MAX_HEADER_BYTES
+      server.ListenAndServe()
+    }
+  }
+}
+
+private fn make_request(
+  method: Str,
+  path: Str,
+  headers: Headers,
+  body: [Byte],
+  context: go_context::Context,
+) Request {
+  Request{
+    method: method,
+    path: path,
+    headers: headers,
+    body: body,
+    context: context,
+  }
+}
+
+private fn make_next(callback: fn(Request, mut Response)) Next {
+  mut state = NextState{callback: callback, ran: false}
+  let store = NextStore{state: state}
+  Next{store: store}
+}
+
+private fn serve_http(
+  middleware_handlers: [Middleware],
+  routes: [Route],
+  max_body_bytes: Int,
+  writer: http::ResponseWriter,
+  raw_request: mut http::Request,
+) {
+  mut headers = Headers::new()
+  for name in raw_request.Header.keys() {
+    for value in raw_request.Header.Values(name) {
+      headers.add(name, value)
+    }
+  }
+
+  if raw_request.ContentLength > Int64::from(max_body_bytes) {
+    raw_request.Body.Close()
+    write_http_response(writer, finalize_response(raw_request.Method, payload_too_large()))
+  } else {
+    let limited_body = io::LimitReader(raw_request.Body, Int64::from(max_body_bytes) + 1)
+    match io::ReadAll(limited_body) {
+      ok(body) => {
+        if body.size() > max_body_bytes {
+          raw_request.Body.Close()
+          write_http_response(writer, finalize_response(raw_request.Method, payload_too_large()))
+        } else {
+          let request = make_request(raw_request.Method, raw_request.URL.Path, headers, body, raw_request.Context())
+          write_http_response(writer, handle_bounded(middleware_handlers, routes, max_body_bytes, request))
+        }
+      },
+      err(_) => write_http_response(writer, finalize_response(raw_request.Method, bad_request())),
+    }
+  }
+}
+
+private fn handle_bounded(
+  middleware_handlers: [Middleware],
+  routes: [Route],
+  max_body_bytes: Int,
+  request: Request,
+) Response {
+  if request.body.size() > max_body_bytes {
+    finalize_response(request.method, payload_too_large())
+  } else {
+    finalize_response(request.method, handle_safely(middleware_handlers, routes, request))
+  }
+}
+
+private fn handle_safely(middleware_handlers: [Middleware], routes: [Route], request: Request) Response {
+  match unsafe {
+    handle_request(middleware_handlers, routes, request)
+  } {
+    ok(response) => response,
+    err(_) => internal_server_error(),
+  }
+}
+
+private fn handle_request(middleware_handlers: [Middleware], routes: [Route], request: Request) Response {
+  mut response = Response::new()
+  mut route_index = -1
+  mut get_route_index = -1
+  mut candidate_index = 0
+  mut path_found = false
+  mut allowed_methods: [Str] = []
+  let method = request.method
+
+  for route in routes {
+    if route.path == request.path {
+      path_found = true
+      allowed_methods = append_unique(allowed_methods, route.method)
+      if get_route_index == -1 and route.method == "GET" {
+        get_route_index = candidate_index
+      }
+      if route_index == -1 and route.method == method {
+        route_index = candidate_index
+      }
+    }
+    candidate_index =+ 1
+  }
+  if method == "HEAD" and route_index == -1 {
+    route_index = get_route_index
+  }
+  if list_contains(allowed_methods, "GET") {
+    allowed_methods = append_unique(allowed_methods, "HEAD")
+  }
+
+  if path_found and route_index == -1 {
+    response.status = 405
+    response.headers.set("Allow", strings::Join(allowed_methods, ", "))
+  }
+
+  dispatch(middleware_handlers, 0, routes, route_index, request, response)
+  response
+}
+
+private fn dispatch(
+  middleware_handlers: [Middleware],
+  index: Int,
+  routes: [Route],
+  route_index: Int,
+  request: Request,
+  response: mut Response,
+) {
+  if index < middleware_handlers.size() {
+    let middleware = middleware_handlers.at(index).expect("middleware index is in bounds")
+    let next = make_next(
+      fn(next_request: Request, next_response: mut Response) {
+        dispatch(middleware_handlers, index + 1, routes, route_index, next_request, next_response)
+      },
+    )
+    middleware(request, response, next)
+  } else if route_index >= 0 {
+    let matched_route = routes.at(route_index).expect("matched route index is in bounds")
+    matched_route.handler(request, response)
+  }
+}
+
+private fn finalize_response(method: Str, response: Response) Response {
+  if response.status < 200 or response.status > 599 {
+    finalize_response(method, internal_server_error())
+  } else if method == "CONNECT" and response.status >= 200 and response.status < 300 {
+    finalize_response(method, internal_server_error())
+  } else {
+    mut finalized = response
+    finalized.headers.remove("Transfer-Encoding")
+    finalized.headers.remove("Trailer")
+    finalized.headers.remove("Content-Length")
+    let body_allowed = response.status != 204 and response.status != 205 and response.status != 304
+    if body_allowed {
+      finalized.headers.set("Content-Length", response.body.size().to_str())
+    }
+    if method == "HEAD" or not body_allowed {
+      finalized.body = []
+    }
+    finalized
+  }
+}
+
+private fn internal_server_error() Response {
+  mut response = Response::new()
+  response.text(500, "Internal Server Error")
+  response
+}
+
+private fn payload_too_large() Response {
+  mut response = Response::new()
+  response.text(413, "Payload Too Large")
+  response
+}
+
+private fn bad_request() Response {
+  mut response = Response::new()
+  response.text(400, "Bad Request")
+  response
+}
+
+private fn validate_route(method: Str, path: Str) {
+  if not valid_token(method) {
+    panic("invalid HTTP method: {method}")
+  }
+  if (not strings::HasPrefix(path, "/")) or strings::Contains(path, "?") or strings::Contains(path, "#") {
+    panic("route path must start with '/' and contain no query or fragment: {path}")
+  }
+}
+
+private fn validate_header(name: Str, value: Str) {
+  if not valid_token(name) {
+    panic("invalid HTTP header name: {name}")
+  }
+  for character in value.runes() {
+    if character != '\t' and (character < ' ' or character == '\x7f') {
+      panic("HTTP header values cannot contain control characters other than HTAB")
+    }
+  }
+}
+
+private fn valid_token(value: Str) Bool {
+  if value == "" {
+    false
+  } else {
+    mut valid = true
+    for character in value.runes() {
+      let letter = character >= 'a' and character <= 'z' or character >= 'A' and character <= 'Z'
+      let digit = character >= '0' and character <= '9'
+      let symbol = strings::Contains("!#$%&'*+-.^_`|~", character.to_str())
+      if (not letter) and (not digit) and (not symbol) {
+        valid = false
+      }
+    }
+    valid
+  }
+}
+
+private fn list_contains(values: [Str], expected: Str) Bool {
+  mut found = false
+  for value in values {
+    if value == expected {
+      found = true
+    }
+  }
+  found
+}
+
+private fn append_unique(values: [Str], value: Str) [Str] {
+  mut result = values
+  if not list_contains(result, value) {
+    result.push(value)
+  }
+  result
+}
+
+private fn write_http_response(writer: http::ResponseWriter, response: Response) {
+  for name in response.headers.names() {
+    for value in response.headers.values(name) {
+      writer.Header().Add(name, value)
+    }
+  }
+  writer.WriteHeader(response.status)
+  mut body = response.body
+  writer.Write(body)
+}

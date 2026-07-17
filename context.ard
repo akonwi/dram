@@ -1,0 +1,36 @@
+use ard/unsafe
+
+use go:context
+use go:time
+
+fn background() context::Context {
+  context::Background()
+}
+
+fn with_value(parent: context::Context, key: $Key, value: $Value) context::Context {
+  context::WithValue(parent, key, value)
+}
+
+fn value(ctx: context::Context, key: $Key) Any? {
+  let found = ctx.Value(key)
+  if unsafe::is_nil(found) {
+    Maybe::new()
+  } else {
+    Maybe::new(found)
+  }
+}
+
+fn done(ctx: context::Context) Receiver<Void> {
+  ctx.Done()
+}
+
+fn err(ctx: context::Context) Str? {
+  match ctx.Err() {
+    ok => Maybe::new(),
+    err(message) => Maybe::new(message),
+  }
+}
+
+fn deadline(ctx: context::Context) time::Time? {
+  ctx.Deadline()
+}

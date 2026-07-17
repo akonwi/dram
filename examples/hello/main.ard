@@ -1,0 +1,28 @@
+use dram
+
+fn main() {
+  mut app = dram::App::new()
+  app.set_max_body_bytes(8)
+  app.use_middleware(
+    fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
+      response.header("X-Powered-By", "Dram")
+      next.run(request, response)
+    },
+  )
+  app.get(
+    "/",
+    fn(request, response) {
+      response.add_header("Set-Cookie", "first=1; HttpOnly; SameSite=Lax")
+      response.add_header("Set-Cookie", "second=2; HttpOnly; SameSite=Lax")
+      response.text(200, "Hello from Dram")
+    },
+  )
+  app.post(
+    "/echo",
+    fn(request: dram::Request, response: mut dram::Response) {
+      response.bytes(200, request.body)
+    },
+  )
+
+  app.listen(port: 8080).expect("Failed to start server")
+}

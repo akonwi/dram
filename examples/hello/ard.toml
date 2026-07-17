@@ -1,0 +1,5 @@
+name = "dram_hello"
+ard = ">= 0.1.0"
+
+[dependencies]
+dram = { path = "../.." }
