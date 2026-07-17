@@ -76,6 +76,92 @@ test fn middleware_runs_for_not_found_and_method_not_allowed() Void!Str {
   testing::pass()
 }
 
+test fn path_params_are_available_to_middleware_and_handlers() Void!Str {
+  mut app = dram::App::new()
+  app.use_middleware(
+    fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
+      response.header("X-User-Id", request.param("id").or(""))
+      next.run(request, response)
+    },
+  )
+  app.get(
+    "/users/:id",
+    fn(request, response) {
+      let id = request.param("id").or("")
+      let missing = request.param("missing").or("")
+      response.text(200, "{id}:{missing}")
+    },
+  )
+
+  let response = app.handle(dram::Request::new("GET", "/users/42"))
+  try testing::assert(response.status == 200, "parameter route did not match")
+  try testing::assert(Str::from(response.body) == "42:", "path parameter lookup changed")
+  try testing::assert(response.headers.get("X-User-Id").or("") == "42", "middleware missed path params")
+
+  let head = app.handle(dram::Request::new("HEAD", "/users/42"))
+  try testing::assert(head.status == 200 and head.body.size() == 0, "HEAD parameter fallback failed")
+  try testing::assert(head.headers.get("X-User-Id").or("") == "42", "HEAD fallback lost path params")
+
+  let empty = app.handle(dram::Request::new("GET", "/users/"))
+  try testing::assert(empty.status == 404, "path parameter matched an empty segment")
+
+  let wrong_method = app.handle(dram::Request::new("POST", "/users/42"))
+  try testing::assert(wrong_method.status == 405, "parameter path did not produce 405")
+  try testing::assert(
+    wrong_method.headers.get("X-User-Id").or("missing") == "",
+    "405 exposed path params",
+  )
+  testing::pass()
+}
+
+test fn static_routes_outrank_params_and_equivalent_patterns_conflict() Void!Str {
+  mut app = dram::App::new()
+  app.get(
+    "/users/:id",
+    fn(request, response) {
+      response.text(200, "param:{request.param("id").or("")}")
+    },
+  )
+  app.get(
+    "/users/new",
+    fn(request, response) {
+      response.text(200, "static")
+    },
+  )
+  app.post(
+    "/users/:name",
+    fn(request, response) {
+      response.text(201, request.param("name").or(""))
+    },
+  )
+
+  let static_response = app.handle(dram::Request::new("GET", "/users/new"))
+  try testing::assert(
+    Str::from(static_response.body) == "static",
+    "parameter route outranked static route",
+  )
+  let parameter_response = app.handle(dram::Request::new("GET", "/users/ada"))
+  try testing::assert(
+    Str::from(parameter_response.body) == "param:ada",
+    "parameter route did not capture",
+  )
+  let other_method = app.handle(dram::Request::new("POST", "/users/ada"))
+  try testing::assert(
+    Str::from(other_method.body) == "ada",
+    "same pattern shape was rejected across methods",
+  )
+
+  let conflicting = unsafe {
+    app.get("/users/:name", fn(request, response) {})
+  }
+  try testing::assert(conflicting.is_err(), "equivalent parameter pattern was accepted")
+  let duplicate_name = unsafe {
+    app.get("/teams/:id/users/:id", fn(request, response) {})
+  }
+  try testing::assert(duplicate_name.is_err(), "duplicate path parameter name was accepted")
+  testing::pass()
+}
+
 test fn middleware_short_circuits_by_omitting_next() Void!Str {
   mut app = dram::App::new()
   app.use_middleware(

@@ -8,7 +8,7 @@ The package root provides the first buffered HTTP slice:
 
 - immutable requests carrying Go-compatible contexts;
 - distinct route handlers and one-shot middleware `Next` capabilities;
-- exact, method-aware routes and 404/405 responses;
+- static and `:name` parameter routes with method-aware 404/405 responses;
 - in-memory `App.handle(Request)` dispatch;
 - buffered text and byte responses with case-insensitive, multi-value headers;
 - bounded request bodies with a 1 MiB default;
@@ -39,6 +39,19 @@ fn main() {
 Application dependencies belong in closure captures, not request contexts. Middleware short-circuits by completing the response without calling `Next`. Route handlers never receive `Next`.
 
 The complete path-dependency example is under [`examples/hello/`](./examples/hello/).
+
+## Routing
+
+Single-segment path parameters use the same API as the former `ard/http` module:
+
+```ard
+app.get("/users/:id", fn(request, response) {
+  let id = request.param("id").expect("matched route contains :id")
+  response.text(200, id)
+})
+```
+
+Static segments outrank parameters. Equivalent patterns such as `/users/:id` and `/users/:name` are rejected for the same method. `request.param(name)` returns `Str?`, allowing handlers and middleware to distinguish a missing parameter from an empty value.
 
 ## Context API
 
@@ -99,6 +112,6 @@ The compiler probe under [`examples/feasibility/`](./examples/feasibility/) rema
 
 ## Current limits
 
-Routing is exact-path only. Responses and request bodies are fully buffered, oversized bodies return 413, and other body decoding failures return 400. Informational statuses and successful CONNECT responses are not supported as final buffered responses. Panic recovery uses Ard's `unsafe` boundary, returns a generic 500, and does not currently capture or log a stack. Streaming, files, SSE, WebSockets, route parameters, groups, and detached request contexts are intentionally not exposed yet.
+Routing supports static paths and single-segment parameters, but not catch-all parameters or route groups. Responses and request bodies are fully buffered, oversized bodies return 413, and other body decoding failures return 400. Informational statuses and successful CONNECT responses are not supported as final buffered responses. Panic recovery uses Ard's `unsafe` boundary, returns a generic 500, and does not currently capture or log a stack. Streaming, files, SSE, WebSockets, route groups, and detached request contexts are intentionally not exposed yet.
 
 Architecture decisions live in [`docs/`](./docs/).

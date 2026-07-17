@@ -70,10 +70,11 @@ struct Request {
   headers: Headers,
   body: [Byte],
   context: go_context::Context,
+  path_params: [Str: Str],
 }
 
 fn Request::new(method: Str, path: Str) Request {
-  make_request(method, path, Headers::new(), [], request_context::background())
+  make_request(method, path, Headers::new(), [], request_context::background(), [:])
 }
 
 impl Request {
@@ -85,8 +86,12 @@ impl Request {
     self.context
   }
 
+  fn param(name: Str) Str? {
+    self.path_params.get(name)
+  }
+
   fn with_context(context: go_context::Context) Request {
-    make_request(self.method, self.path, self.headers, self.body, context)
+    make_request(self.method, self.path, self.headers, self.body, context, self.path_params)
   }
 }
 
@@ -156,9 +161,15 @@ impl Next {
   }
 }
 
+struct RouteSegment {
+  value: Str,
+  name: Str?,
+}
+
 private struct Route {
   method: Str,
   path: Str,
+  segments: [RouteSegment],
   handler: Handler,
 }
 
@@ -202,15 +213,17 @@ impl App {
 
   fn mut route(method: Str, path: Str, handler: Handler) {
     validate_route(method, path)
+    let segments = compile_route(path)
     for existing in self.routes {
-      if existing.method == method and existing.path == path {
-        panic("duplicate route: {method} {path}")
+      if existing.method == method and route_shapes_equal(existing.segments, segments) {
+        panic("conflicting route: {method} {path}")
       }
     }
     self.routes.push(
       Route{
         method: method,
         path: path,
+        segments: segments,
         handler: handler,
       },
     )
@@ -290,6 +303,7 @@ private fn make_request(
   headers: Headers,
   body: [Byte],
   context: go_context::Context,
+  path_params: [Str: Str],
 ) Request {
   Request{
     method: method,
@@ -297,6 +311,7 @@ private fn make_request(
     headers: headers,
     body: body,
     context: context,
+    path_params: path_params,
   }
 }
 
@@ -331,7 +346,7 @@ private fn serve_http(
           raw_request.Body.Close()
           write_http_response(writer, finalize_response(raw_request.Method, payload_too_large()))
         } else {
-          let request = make_request(raw_request.Method, raw_request.URL.Path, headers, body, raw_request.Context())
+          let request = make_request(raw_request.Method, raw_request.URL.Path, headers, body, raw_request.Context(), [:])
           write_http_response(writer, handle_bounded(middleware_handlers, routes, max_body_bytes, request))
         }
       },
@@ -365,27 +380,34 @@ private fn handle_safely(middleware_handlers: [Middleware], routes: [Route], req
 private fn handle_request(middleware_handlers: [Middleware], routes: [Route], request: Request) Response {
   mut response = Response::new()
   mut route_index = -1
+  mut route_params: [Str: Str] = [:]
   mut get_route_index = -1
+  mut get_route_params: [Str: Str] = [:]
   mut candidate_index = 0
   mut path_found = false
   mut allowed_methods: [Str] = []
   let method = request.method
+  let path_segments = strings::Split(request.path, "/")
 
   for route in routes {
-    if route.path == request.path {
+    let matched = match_route(route.segments, path_segments)
+    if matched.matches {
       path_found = true
       allowed_methods = append_unique(allowed_methods, route.method)
-      if get_route_index == -1 and route.method == "GET" {
+      if route.method == "GET" and route_is_preferred(routes, get_route_index, route) {
         get_route_index = candidate_index
+        get_route_params = matched.params
       }
-      if route_index == -1 and route.method == method {
+      if route.method == method and route_is_preferred(routes, route_index, route) {
         route_index = candidate_index
+        route_params = matched.params
       }
     }
     candidate_index =+ 1
   }
   if method == "HEAD" and route_index == -1 {
     route_index = get_route_index
+    route_params = get_route_params
   }
   if list_contains(allowed_methods, "GET") {
     allowed_methods = append_unique(allowed_methods, "HEAD")
@@ -396,7 +418,9 @@ private fn handle_request(middleware_handlers: [Middleware], routes: [Route], re
     response.headers.set("Allow", strings::Join(allowed_methods, ", "))
   }
 
-  dispatch(middleware_handlers, 0, routes, route_index, request, response)
+  mut routed_request = request
+  routed_request.path_params = route_params
+  dispatch(middleware_handlers, 0, routes, route_index, routed_request, response)
   response
 }
 
@@ -419,6 +443,111 @@ private fn dispatch(
   } else if route_index >= 0 {
     let matched_route = routes.at(route_index).expect("matched route index is in bounds")
     matched_route.handler(request, response)
+  }
+}
+
+private struct RouteMatch {
+  matches: Bool,
+  params: [Str: Str],
+}
+
+private fn compile_route(path: Str) [RouteSegment] {
+  mut segments: [RouteSegment] = []
+  mut parameter_names: [Str: Bool] = [:]
+  for segment in strings::Split(path, "/") {
+    if strings::HasPrefix(segment, ":") {
+      let name = strings::TrimPrefix(segment, ":")
+      if not valid_path_param_name(name) {
+        panic("invalid path parameter: {segment}")
+      }
+      if parameter_names.get(name).is_some() {
+        panic("duplicate path parameter: {name}")
+      }
+      parameter_names.set(name, true)
+      segments.push(RouteSegment{value: segment, name: Maybe::new(name)})
+    } else {
+      segments.push(RouteSegment{value: segment, name: Maybe::new()})
+    }
+  }
+  segments
+}
+
+private fn route_shapes_equal(left: [RouteSegment], right: [RouteSegment]) Bool {
+  if left.size() != right.size() {
+    false
+  } else {
+    mut equal = true
+    for left_segment, index in left {
+      let right_segment = right.at(index).expect("route segment index is in bounds")
+      let left_is_param = left_segment.name.is_some()
+      let right_is_param = right_segment.name.is_some()
+      if left_is_param != right_is_param {
+        equal = false
+      } else if (not left_is_param) and left_segment.value != right_segment.value {
+        equal = false
+      }
+    }
+    equal
+  }
+}
+
+private fn match_route(route_segments: [RouteSegment], path_segments: [Str]) RouteMatch {
+  mut matches = route_segments.size() == path_segments.size()
+  mut params: [Str: Str] = [:]
+  if matches {
+    for route_segment, index in route_segments {
+      let path_segment = path_segments.at(index).expect("path segment index is in bounds")
+      if route_segment.name.is_some() {
+        if path_segment == "" {
+          matches = false
+        } else {
+          params.set(route_segment.name.or(""), path_segment)
+        }
+      } else if route_segment.value != path_segment {
+        matches = false
+      }
+    }
+  }
+  RouteMatch{matches: matches, params: params}
+}
+
+private fn route_is_preferred(routes: [Route], current_index: Int, candidate: Route) Bool {
+  if current_index < 0 {
+    true
+  } else {
+    let current = routes.at(current_index).expect("selected route index is in bounds")
+    route_more_specific(candidate.segments, current.segments)
+  }
+}
+
+private fn route_more_specific(candidate: [RouteSegment], current: [RouteSegment]) Bool {
+  mut decided = false
+  mut preferred = false
+  for candidate_segment, index in candidate {
+    let current_segment = current.at(index).expect("route segment index is in bounds")
+    let candidate_is_param = candidate_segment.name.is_some()
+    let current_is_param = current_segment.name.is_some()
+    if (not decided) and candidate_is_param != current_is_param {
+      decided = true
+      preferred = not candidate_is_param
+    }
+  }
+  preferred
+}
+
+private fn valid_path_param_name(name: Str) Bool {
+  if name == "" {
+    false
+  } else {
+    mut valid = true
+    for character in name.runes() {
+      let letter = character >= 'a' and character <= 'z' or character >= 'A' and character <= 'Z'
+      let digit = character >= '0' and character <= '9'
+      if (not letter) and (not digit) and character != '_' {
+        valid = false
+      }
+    }
+    valid
   }
 }
 

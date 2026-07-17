@@ -54,7 +54,16 @@ Buffered responses are committed only after the middleware chain completes. File
 
 ### Routing and middleware
 
-Routing is method-aware and supports path parameters, route groups, and middleware. Route registration occurs before serving; the route table is frozen once the server starts so request dispatch can remain concurrency-safe without route mutation locks.
+Routing is method-aware and supports path parameters, route groups, and middleware. Single-segment parameters use the former `ard/http` syntax and accessor:
+
+```ard
+app.get("/users/:id", fn(request, response) {
+  let id = request.param("id").expect("matched route contains :id")
+  response.text(200, id)
+})
+```
+
+Static segments outrank parameter segments. Structurally equivalent parameter patterns are rejected for the same method, and repeated parameter names within one pattern are invalid. `request.param(name)` returns `Str?` so callers can distinguish a missing parameter from an empty value. Route registration occurs before serving; the route table is frozen once the server starts so request dispatch can remain concurrency-safe without route mutation locks.
 
 Middleware has a distinct type and is the only code that receives a continuation:
 

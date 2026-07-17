@@ -17,6 +17,15 @@ fn main() {
       response.text(200, "Hello from Dram")
     },
   )
+
+  app.get(
+    "/hello/:name",
+    fn(request, response) {
+      let name = request.param("name").or("world")
+      response.text(200, "Hello {name}!")
+    },
+  )
+
   app.post(
     "/echo",
     fn(request: dram::Request, response: mut dram::Response) {

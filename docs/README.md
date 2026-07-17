@@ -2,6 +2,10 @@
 
 This directory contains project-wide architecture and design documentation.
 
+## Roadmap
+
+Planned and incomplete work from the accepted ADRs is tracked in [`roadmap.md`](./roadmap.md).
+
 ## Architecture Decision Records
 
 Architecture Decision Records (ADRs) live in [`adrs/`](./adrs/). An ADR records a significant decision, the context that motivated it, and its consequences.
