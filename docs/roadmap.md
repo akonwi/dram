@@ -9,9 +9,6 @@ This checklist collects the planned and incomplete work described by the accepte
 ## Response architecture
 
 - [ ] Introduce an explicit internal response delivery mode.
-- [ ] Track when a response becomes committed.
-- [ ] Reject status, header, and delivery-mode mutation after commitment.
-- [ ] Evaluate a read-only `response.committed()` query for middleware and diagnostics.
 - [ ] Ensure response helpers consistently replace an earlier uncommitted delivery selection.
 
 ## Buffered response helpers
