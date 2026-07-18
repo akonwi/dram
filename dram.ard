@@ -170,6 +170,7 @@ private struct Route {
   method: Str,
   path: Str,
   segments: [RouteSegment],
+  middleware_handlers: [Middleware],
   handler: Handler,
 }
 
@@ -212,21 +213,16 @@ impl App {
   }
 
   fn mut route(method: Str, path: Str, handler: Handler) {
-    validate_route(method, path)
-    let segments = compile_route(path)
-    for existing in self.routes {
-      if existing.method == method and route_shapes_equal(existing.segments, segments) {
-        panic("conflicting route: {method} {path}")
-      }
+    register_route(self, method, path, [], handler)
+  }
+
+  fn mut group(prefix: Str) Group {
+    validate_group_prefix(prefix)
+    Group{
+      _app: self,
+      _prefix: prefix,
+      _middleware_handlers: [],
     }
-    self.routes.push(
-      Route{
-        method: method,
-        path: path,
-        segments: segments,
-        handler: handler,
-      },
-    )
   }
 
   fn mut get(path: Str, handler: Handler) {
@@ -294,6 +290,123 @@ impl App {
       server.MaxHeaderBytes = DEFAULT_MAX_HEADER_BYTES
       server.ListenAndServe()
     }
+  }
+}
+
+struct Group {
+  _app: mut App,
+  _prefix: Str,
+  _middleware_handlers: [Middleware],
+}
+
+impl Group {
+  fn mut use_middleware(middleware: Middleware) {
+    mut middleware_handlers = copy_middleware(self._middleware_handlers)
+    middleware_handlers.push(middleware)
+    self._middleware_handlers = middleware_handlers
+  }
+
+  fn mut group(prefix: Str) Group {
+    validate_group_prefix(prefix)
+    Group{
+      _app: self._app,
+      _prefix: join_group_prefix(self._prefix, prefix),
+      _middleware_handlers: copy_middleware(self._middleware_handlers),
+    }
+  }
+
+  fn mut route(method: Str, path: Str, handler: Handler) {
+    validate_route_path(path)
+    register_route(
+      self._app,
+      method,
+      join_group_route(self._prefix, path),
+      self._middleware_handlers,
+      handler,
+    )
+  }
+
+  fn mut get(path: Str, handler: Handler) {
+    self.route("GET", path, handler)
+  }
+
+  fn mut head(path: Str, handler: Handler) {
+    self.route("HEAD", path, handler)
+  }
+
+  fn mut post(path: Str, handler: Handler) {
+    self.route("POST", path, handler)
+  }
+
+  fn mut put(path: Str, handler: Handler) {
+    self.route("PUT", path, handler)
+  }
+
+  fn mut patch(path: Str, handler: Handler) {
+    self.route("PATCH", path, handler)
+  }
+
+  fn mut delete(path: Str, handler: Handler) {
+    self.route("DELETE", path, handler)
+  }
+
+  fn mut options(path: Str, handler: Handler) {
+    self.route("OPTIONS", path, handler)
+  }
+
+  fn mut trace(path: Str, handler: Handler) {
+    self.route("TRACE", path, handler)
+  }
+}
+
+private fn register_route(
+  app: mut App,
+  method: Str,
+  path: Str,
+  middleware_handlers: [Middleware],
+  handler: Handler,
+) {
+  validate_route(method, path)
+  let segments = compile_route(path)
+  for existing in app.routes {
+    if existing.method == method and route_shapes_equal(existing.segments, segments) {
+      panic("conflicting route: {method} {path}")
+    }
+  }
+  app.routes.push(
+    Route{
+      method: method,
+      path: path,
+      segments: segments,
+      middleware_handlers: copy_middleware(middleware_handlers),
+      handler: handler,
+    },
+  )
+}
+
+private fn copy_middleware(middleware_handlers: [Middleware]) [Middleware] {
+  mut copied: [Middleware] = []
+  for middleware in middleware_handlers {
+    copied.push(middleware)
+  }
+  copied
+}
+
+private fn join_group_prefix(parent: Str, child: Str) Str {
+  if parent == "/" {
+    child
+  } else if child == "/" {
+    parent
+  } else {
+    "{parent}{child}"
+  }
+}
+
+private fn join_group_route(prefix: Str, path: Str) Str {
+  if prefix == "/" {
+    path
+  } else {
+    "{prefix}{path}"
   }
 }
 
@@ -420,7 +533,14 @@ private fn handle_request(middleware_handlers: [Middleware], routes: [Route], re
 
   mut routed_request = request
   routed_request.path_params = route_params
-  dispatch(middleware_handlers, 0, routes, route_index, routed_request, response)
+  mut selected_middleware = copy_middleware(middleware_handlers)
+  if route_index >= 0 {
+    let matched_route = routes.at(route_index).expect("matched route index is in bounds")
+    for middleware in matched_route.middleware_handlers {
+      selected_middleware.push(middleware)
+    }
+  }
+  dispatch(selected_middleware, 0, routes, route_index, routed_request, response)
   response
 }
 
@@ -594,8 +714,24 @@ private fn validate_route(method: Str, path: Str) {
   if not valid_token(method) {
     panic("invalid HTTP method: {method}")
   }
+  validate_route_path(path)
+}
+
+private fn validate_route_path(path: Str) {
   if (not strings::HasPrefix(path, "/")) or strings::Contains(path, "?") or strings::Contains(path, "#") {
     panic("route path must start with '/' and contain no query or fragment: {path}")
+  }
+}
+
+private fn validate_group_prefix(prefix: Str) {
+  validate_route_path(prefix)
+  if prefix != "/" and strings::HasSuffix(prefix, "/") {
+    panic("group prefix cannot end with '/': {prefix}")
+  }
+  for segment in strings::Split(prefix, "/") {
+    if strings::HasPrefix(segment, ":") {
+      panic("group prefixes cannot contain parameters: {prefix}")
+    }
   }
 }
 

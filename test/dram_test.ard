@@ -15,6 +15,14 @@ fn str_value(request: dram::Request, key: ValueKey) Str? {
   }
 }
 
+fn order_middleware(label: Str) dram::Middleware {
+  fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
+    let current = response.headers.get("X-Order").or("")
+    response.header("X-Order", "{current}{label}")
+    next.run(request, response)
+  }
+}
+
 test fn exact_route_uses_captured_dependency_and_middleware() Void!Str {
   let greeting = "Hello"
   mut app = dram::App::new()
@@ -159,6 +167,152 @@ test fn static_routes_outrank_params_and_equivalent_patterns_conflict() Void!Str
     app.get("/teams/:id/users/:id", fn(request, response) {})
   }
   try testing::assert(duplicate_name.is_err(), "duplicate path parameter name was accepted")
+  testing::pass()
+}
+
+test fn groups_compose_static_prefixes_and_snapshot_middleware() Void!Str {
+  mut app = dram::App::new()
+  app.use_middleware(order_middleware("global,"))
+
+  mut api = app.group("/api")
+  api.get(
+    "/before",
+    fn(request, response) {
+      response.text(200, "before")
+    },
+  )
+  api.use_middleware(order_middleware("parent,"))
+  api.get(
+    "/after",
+    fn(request, response) {
+      response.text(200, "after")
+    },
+  )
+
+  mut admin = api.group("/admin")
+  admin.use_middleware(order_middleware("child,"))
+  admin.get(
+    "/users/:id",
+    fn(request, response) {
+      response.text(200, request.param("id").or(""))
+    },
+  )
+
+  api.use_middleware(order_middleware("late,"))
+  api.get(
+    "/late",
+    fn(request, response) {
+      response.text(200, "late")
+    },
+  )
+  admin.get(
+    "/reports",
+    fn(request, response) {
+      response.text(200, "reports")
+    },
+  )
+
+  let before = app.handle(dram::Request::new("GET", "/api/before"))
+  try testing::assert(
+    before.headers.get("X-Order").or("") == "global,",
+    "group middleware was retroactive",
+  )
+  let after = app.handle(dram::Request::new("GET", "/api/after"))
+  try testing::assert(
+    after.headers.get("X-Order").or("") == "global,parent,",
+    "parent middleware order changed",
+  )
+  let nested = app.handle(dram::Request::new("GET", "/api/admin/users/42"))
+  try testing::assert(Str::from(nested.body) == "42", "nested group path did not compose")
+  try testing::assert(
+    nested.headers.get("X-Order").or("") == "global,parent,child,",
+    "nested middleware inheritance changed",
+  )
+  let late = app.handle(dram::Request::new("GET", "/api/late"))
+  try testing::assert(
+    late.headers.get("X-Order").or("") == "global,parent,late,",
+    "late middleware was not applied",
+  )
+  let child_after_late = app.handle(dram::Request::new("GET", "/api/admin/reports"))
+  try testing::assert(
+    child_after_late.headers.get("X-Order").or("") == "global,parent,child,",
+    "existing child inherited middleware added later to its parent",
+  )
+
+  let missing = app.handle(dram::Request::new("GET", "/api/missing"))
+  try testing::assert(missing.status == 404, "missing grouped route did not return 404")
+  try testing::assert(missing.headers.get("X-Order").or("") == "global,", "group middleware ran for 404")
+  let wrong_method = app.handle(dram::Request::new("POST", "/api/after"))
+  try testing::assert(wrong_method.status == 405, "grouped route did not return 405")
+  try testing::assert(
+    wrong_method.headers.get("X-Order").or("") == "global,",
+    "group middleware ran for 405",
+  )
+  testing::pass()
+}
+
+test fn copied_groups_isolate_middleware_snapshots() Void!Str {
+  mut app = dram::App::new()
+  mut base = app.group("/copy")
+  base.use_middleware(order_middleware("one,"))
+  base.use_middleware(order_middleware("two,"))
+  base.use_middleware(order_middleware("three,"))
+
+  mut left = base
+  mut right = base
+  left.use_middleware(order_middleware("left,"))
+  right.use_middleware(order_middleware("right,"))
+  left.get(
+    "/left",
+    fn(request, response) {
+      response.text(200, "left")
+    },
+  )
+  right.get(
+    "/right",
+    fn(request, response) {
+      response.text(200, "right")
+    },
+  )
+
+  let left_response = app.handle(dram::Request::new("GET", "/copy/left"))
+  try testing::assert(
+    left_response.headers.get("X-Order").or("") == "one,two,three,left,",
+    "right group overwrote left middleware",
+  )
+  let right_response = app.handle(dram::Request::new("GET", "/copy/right"))
+  try testing::assert(
+    right_response.headers.get("X-Order").or("") == "one,two,three,right,",
+    "left group overwrote right middleware",
+  )
+  testing::pass()
+}
+
+test fn groups_validate_prefixes_paths_and_combined_conflicts() Void!Str {
+  mut app = dram::App::new()
+  mut api = app.group("/api")
+  api.get("/users", fn(request, response) {})
+
+  let parameter_prefix = unsafe {
+    app.group("/orgs/:id")
+  }
+  try testing::assert(parameter_prefix.is_err(), "parameterized group prefix was accepted")
+  let trailing_slash = unsafe {
+    app.group("/api/")
+  }
+  try testing::assert(trailing_slash.is_err(), "trailing group slash was accepted")
+  let relative_prefix = unsafe {
+    app.group("api")
+  }
+  try testing::assert(relative_prefix.is_err(), "relative group prefix was accepted")
+  let relative_route = unsafe {
+    api.get("users", fn(request, response) {})
+  }
+  try testing::assert(relative_route.is_err(), "relative grouped route was accepted")
+  let conflict = unsafe {
+    app.get("/api/users", fn(request, response) {})
+  }
+  try testing::assert(conflict.is_err(), "combined grouped route bypassed conflict detection")
   testing::pass()
 }
 

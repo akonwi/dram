@@ -54,7 +54,7 @@ Buffered responses are committed only after the middleware chain completes. File
 
 ### Routing and middleware
 
-Routing is method-aware and supports path parameters, route groups, and middleware. Single-segment parameters use the former `ard/http` syntax and accessor:
+Routing is method-aware and supports path parameters, route groups, and middleware. Single-segment parameters use `:name` patterns:
 
 ```ard
 app.get("/users/:id", fn(request, response) {
@@ -63,7 +63,11 @@ app.get("/users/:id", fn(request, response) {
 })
 ```
 
-Static segments outrank parameter segments. Structurally equivalent parameter patterns are rejected for the same method, and repeated parameter names within one pattern are invalid. `request.param(name)` returns `Str?` so callers can distinguish a missing parameter from an empty value. Route registration occurs before serving; the route table is frozen once the server starts so request dispatch can remain concurrency-safe without route mutation locks.
+Static segments outrank parameter segments. Structurally equivalent parameter patterns are rejected for the same method, and repeated parameter names within one pattern are invalid. `request.param(name)` returns `Str?` so callers can distinguish a missing parameter from an empty value.
+
+`app.group(prefix)` returns a mutable group and groups may be nested. Group prefixes are static; parameters remain available in child route paths. Group middleware is snapshotted onto subsequently registered routes, with parent middleware running before child middleware. A child snapshots its parent's middleware when created, so later additions to the parent do not affect an existing child. Group middleware does not run for 404 or 405 responses because no group route was selected.
+
+Route registration occurs before serving; the route table is frozen once the server starts so request dispatch can remain concurrency-safe without route mutation locks.
 
 Middleware has a distinct type and is the only code that receives a continuation:
 

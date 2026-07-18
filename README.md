@@ -8,7 +8,7 @@ The package root provides the first buffered HTTP slice:
 
 - immutable requests carrying Go-compatible contexts;
 - distinct route handlers and one-shot middleware `Next` capabilities;
-- static and `:name` parameter routes with method-aware 404/405 responses;
+- static and `:name` parameter routes, nested route groups, and method-aware 404/405 responses;
 - in-memory `App.handle(Request)` dispatch;
 - buffered text and byte responses with case-insensitive, multi-value headers;
 - bounded request bodies with a 1 MiB default;
@@ -42,7 +42,7 @@ The complete path-dependency example is under [`examples/hello/`](./examples/hel
 
 ## Routing
 
-Single-segment path parameters use the same API as the former `ard/http` module:
+Single-segment path parameters use `:name` patterns:
 
 ```ard
 app.get("/users/:id", fn(request, response) {
@@ -52,6 +52,20 @@ app.get("/users/:id", fn(request, response) {
 ```
 
 Static segments outrank parameters. Equivalent patterns such as `/users/:id` and `/users/:name` are rejected for the same method. `request.param(name)` returns `Str?`, allowing handlers and middleware to distinguish a missing parameter from an empty value.
+
+Groups compose static path prefixes and middleware:
+
+```ard
+mut api = app.group("/api")
+api.use_middleware(authenticate)
+api.get("/users/:id", show_user)
+
+mut admin = api.group("/admin")
+admin.use_middleware(require_admin)
+admin.delete("/users/:id", delete_user)
+```
+
+Group prefixes cannot contain parameters. Parent middleware runs before child middleware, and newly added group middleware applies only to subsequently registered routes. A child snapshots its parent's middleware when the child is created, so later parent additions do not affect that existing child. Group middleware does not run for 404 or 405 responses.
 
 ## Context API
 
@@ -112,6 +126,6 @@ The compiler probe under [`examples/feasibility/`](./examples/feasibility/) rema
 
 ## Current limits
 
-Routing supports static paths and single-segment parameters, but not catch-all parameters or route groups. Responses and request bodies are fully buffered, oversized bodies return 413, and other body decoding failures return 400. Informational statuses and successful CONNECT responses are not supported as final buffered responses. Panic recovery uses Ard's `unsafe` boundary, returns a generic 500, and does not currently capture or log a stack. Streaming, files, SSE, WebSockets, route groups, and detached request contexts are intentionally not exposed yet.
+Routing supports static paths, single-segment parameters, and static-prefix route groups, but not catch-all parameters. Responses and request bodies are fully buffered, oversized bodies return 413, and other body decoding failures return 400. Informational statuses and successful CONNECT responses are not supported as final buffered responses. Panic recovery uses Ard's `unsafe` boundary, returns a generic 500, and does not currently capture or log a stack. Streaming, files, SSE, WebSockets, and detached request contexts are intentionally not exposed yet.
 
 Architecture decisions live in [`docs/`](./docs/).
