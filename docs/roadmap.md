@@ -4,7 +4,6 @@ This checklist collects the planned and incomplete work described by the accepte
 
 ## Routing
 
-- [ ] Freeze route and middleware registration once serving begins.
 - [ ] Add catch-all path parameters and define their conflict rules.
 
 ## Request context

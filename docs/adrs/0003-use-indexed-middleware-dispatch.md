@@ -38,7 +38,7 @@ A middleware short-circuits by completing the response and not calling `Next`. T
 
 Each middleware invocation receives a continuation for exactly the remaining chain. The continuation accepts a `Request`, so middleware may derive a context and explicitly propagate it with `request.with_context(derived)`. Route handlers receive no continuation and cannot advance middleware.
 
-Middleware and route snapshots are immutable once the server begins listening. Live `Request`, `Context`, `Response`, and `Next` values remain request-scoped and synchronous; they must not be retained for detached work.
+The server captures immutable middleware and route snapshots before it begins listening. Live `Request`, `Context`, `Response`, and `Next` values remain request-scoped and synchronous; they must not be retained for detached work.
 
 ## Consequences
 

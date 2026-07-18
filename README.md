@@ -126,7 +126,7 @@ let id = match context::value(derived, request_id_key) {
 
 `net/http` runs handlers concurrently. Each request carries its own immutable context and receives a mutable `Response`, but captured closure data may be shared by every request. Application code must synchronize shared maps, lists, mutable references, database clients, counters, and other dependencies. Request contexts, responses, and `Next` capabilities are synchronous and must not be retained or used by detached work after the handler returns.
 
-Complete route and middleware registration before calling `listen`; the server captures the configured application for concurrent reads.
+Complete route and middleware registration before calling `listen`; the server captures an immutable configuration snapshot for concurrent reads. Later registration changes do not affect that running server. Do not mutate registration concurrently with `App.handle`, which reads the application's current configuration.
 
 ## Development
 

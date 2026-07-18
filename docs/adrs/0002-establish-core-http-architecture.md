@@ -69,7 +69,7 @@ Static segments outrank parameter segments. Structurally equivalent parameter pa
 
 `app.group(prefix)` returns a mutable group and groups may be nested. Group prefixes are static; parameters remain available in child route paths. Group middleware is snapshotted onto subsequently registered routes, with parent middleware running before child middleware. A child snapshots its parent's middleware when created, so later additions to the parent do not affect an existing child. Group middleware does not run for 404 or 405 responses because no group route was selected.
 
-Route registration occurs before serving; the route table is frozen once the server starts so request dispatch can remain concurrency-safe without route mutation locks.
+Applications complete route and middleware registration before serving. `listen` captures an immutable configuration snapshot for request dispatch, so later application mutations do not affect the running server and the serving path needs no route-mutation locks. `App.handle` reads the application's current configuration and must not run concurrently with registration changes.
 
 Middleware has a distinct type and is the only code that receives a continuation:
 
