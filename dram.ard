@@ -2,6 +2,7 @@ use ard/unsafe
 
 use go:context as go_context
 use dram/context as request_context
+use go:encoding/json
 use go:io
 use go:net
 use go:net/http
@@ -159,6 +160,13 @@ impl Response {
     self.status = status
     self.headers.set("Content-Type", content_type)
     self.body = body
+  }
+
+  fn mut json(status: Int, value: Any) {
+    match json::Marshal(value) {
+      ok(body) => self.data(status, "application/json; charset=utf-8", body),
+      err(message) => panic("failed to encode JSON response: {message}"),
+    }
   }
 }
 

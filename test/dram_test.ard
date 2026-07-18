@@ -8,6 +8,11 @@ struct ValueKey {
   id: Int,
 }
 
+struct JsonPayload {
+  message: Str,
+  count: Int,
+}
+
 fn str_value(request: dram::Request, key: ValueKey) Str? {
   match request_context::value(request.context(), key) {
     boxed => ard_unsafe::cast<Str>(boxed),
@@ -601,6 +606,49 @@ test fn in_memory_request_constructor_uses_background() Void!Str {
   try testing::assert(response.headers.get("X-Cancelled").or("") == "false", "background was cancelled")
   try testing::assert(response.headers.get("X-Error").or("") == "none", "background had an error")
   try testing::assert(response.headers.get("X-Deadline").or("") == "false", "background had a deadline")
+  testing::pass()
+}
+
+test fn json_helper_buffers_encoded_values_and_recovers_encoding_failures() Void!Str {
+  mut app = dram::App::new()
+  app.get(
+    "/json",
+    fn(request, response) {
+      response.json(201, JsonPayload{message: "hello", count: 2})
+    },
+  )
+  app.get(
+    "/bad-json",
+    fn(request, response) {
+      response.text(202, "partial")
+      response.json(200, fn() {})
+    },
+  )
+
+  let encoded = app.handle(dram::Request::new("GET", "/json"))
+  try testing::assert(encoded.status == 201, "JSON helper status changed")
+  try testing::assert(
+    encoded.headers.get("Content-Type").or("") == "application/json; charset=utf-8",
+    "JSON content type changed",
+  )
+  let encoded_body = Str::from(encoded.body)
+  let expected_message_first = "\{\"message\":\"hello\",\"count\":2\}"
+  let expected_count_first = "\{\"count\":2,\"message\":\"hello\"\}"
+  try testing::assert(
+    encoded_body == expected_message_first or encoded_body == expected_count_first,
+    "JSON body changed: {encoded_body}",
+  )
+
+  let head = app.handle(dram::Request::new("HEAD", "/json"))
+  try testing::assert(
+    head.status == 201 and head.body.size() == 0,
+    "HEAD JSON response retained its body",
+  )
+  try testing::assert(head.headers.get("Content-Length").or("0") != "0", "HEAD JSON length was lost")
+
+  let failed = app.handle(dram::Request::new("GET", "/bad-json"))
+  try testing::assert(failed.status == 500, "JSON encoding failure did not recover")
+  try testing::assert(Str::from(failed.body) == "Internal Server Error", "JSON error exposed details")
   testing::pass()
 }
 

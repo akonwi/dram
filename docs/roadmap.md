@@ -12,7 +12,6 @@ This checklist collects the planned and incomplete work described by the accepte
 
 ## Buffered response helpers
 
-- [ ] Add a JSON response helper.
 - [ ] Evaluate an HTML response helper.
 - [ ] Add a redirect response helper.
 

@@ -34,6 +34,11 @@ code="$(curl -sS -o "$body" -w '%{http_code}' 'http://127.0.0.1:8080/search?q=he
 [[ "$code" == "200" ]]
 [[ "$(cat "$body")" == "hello world" ]]
 
+code="$(curl -sS -D "$headers" -o "$body" -w '%{http_code}' http://127.0.0.1:8080/json)"
+[[ "$code" == "200" ]]
+[[ "$(cat "$body")" == '{"message":"Hello from Dram"}' ]]
+grep -qi '^Content-Type: application/json; charset=utf-8' "$headers"
+
 code="$(curl -sS -o "$body" -w '%{http_code}' http://127.0.0.1:8080/files/images/logo.png)"
 [[ "$code" == "200" ]]
 [[ "$(cat "$body")" == "/images/logo.png" ]]

@@ -34,6 +34,13 @@ fn main() {
   )
 
   app.get(
+    "/json",
+    fn(request, response) {
+      response.json(200, ["message": "Hello from Dram"])
+    },
+  )
+
+  app.get(
     "/search",
     fn(request, response) {
       response.text(200, request.query("q").or(""))

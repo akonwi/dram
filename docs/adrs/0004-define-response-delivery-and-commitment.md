@@ -63,7 +63,7 @@ The framework may expose a read-only `committed()` query for middleware and diag
 
 Buffered text and bytes are held until the middleware chain and recovery boundary complete. The framework then writes status, headers, and body together.
 
-This mode supports complete replacement by recovery and deterministic in-memory testing. Text, JSON, HTML, and small binary payloads use this path.
+This mode supports complete replacement by recovery and deterministic in-memory testing. Text, JSON, HTML, and small binary payloads use this path. JSON encoding completes into a temporary byte list before mutating the response; encoding failures panic inside the recovery boundary and become a generic 500 without exposing partial output.
 
 For `HEAD`, the framework emits the same status and headers that `GET` would produce but suppresses the body. Statuses that forbid bodies, including 204 and 304, also suppress body bytes during finalization.
 

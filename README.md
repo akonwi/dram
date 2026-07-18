@@ -146,6 +146,8 @@ let id = match context::value(derived, request_id_key) {
 
 `response.header(name, value)` replaces a header, while `response.add_header(name, value)` preserves repeated values such as `Set-Cookie`. `response.bytes` uses `application/octet-stream`; use `response.data(status, content_type, bytes)` for an explicit media type.
 
+`response.json(status, value)` buffers compact JSON with `application/json; charset=utf-8`. Encoding completes before the response changes; unsupported values panic and are replaced by the recovery boundary's generic 500 response. Pre-encoded JSON should use `response.data` to avoid encoding it as a JSON string.
+
 ## Concurrency
 
 `net/http` runs handlers concurrently. Each request carries its own immutable context and receives a mutable `Response`, but captured closure data may be shared by every request. Application code must synchronize shared maps, lists, mutable references, database clients, counters, and other dependencies. Request contexts, responses, and `Next` capabilities are synchronous and must not be retained or used by detached work after the handler returns.
