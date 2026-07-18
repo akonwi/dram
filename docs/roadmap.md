@@ -4,7 +4,7 @@ This checklist collects the planned and incomplete work described by the accepte
 
 ## Routing
 
-- [ ] Add catch-all path parameters and define their conflict rules.
+- [ ] Add application-level custom not-found and method-not-allowed handlers.
 
 ## Request context
 

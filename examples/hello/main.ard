@@ -27,6 +27,13 @@ fn main() {
   )
 
   app.get(
+    "/files/*path",
+    fn(request, response) {
+      response.text(200, request.param("path").or(""))
+    },
+  )
+
+  app.get(
     "/search",
     fn(request, response) {
       response.text(200, request.query("q").or(""))

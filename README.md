@@ -8,7 +8,7 @@ The package root provides the first buffered HTTP slice:
 
 - immutable requests carrying Go-compatible contexts and lazily decoded query parameters;
 - distinct route handlers and one-shot middleware `Next` capabilities;
-- static and `:name` parameter routes, nested route groups, and method-aware 404/405 responses;
+- static, `:name`, and final-segment `*name` routes, nested route groups, and method-aware 404/405 responses;
 - in-memory `App.handle(Request)` dispatch;
 - buffered text and byte responses with case-insensitive, multi-value headers;
 - bounded request bodies with a 1 MiB default;
@@ -52,6 +52,16 @@ app.get("/users/:id", fn(request, response) {
 ```
 
 Static segments outrank parameters. Equivalent patterns such as `/users/:id` and `/users/:name` are rejected for the same method. `request.param(name)` returns `Str?`, allowing handlers and middleware to distinguish a missing parameter from an empty value.
+
+A final `*name` parameter captures the remaining path using Gin-compatible semantics:
+
+```ard
+app.get("/files/*path", fn(request, response) {
+  response.text(200, request.param("path").or("/"))
+})
+```
+
+The captured value includes its leading slash, so `/files/images/logo.png` produces `"/images/logo.png"`. `/files/*path` matches `/files/` with `"/"`, but does not match `/files`. Catch-all routes reject overlapping same-method static, parameter, and catch-all routes.
 
 Groups compose static path prefixes and middleware:
 
@@ -145,6 +155,6 @@ The compiler probe under [`examples/feasibility/`](./examples/feasibility/) rema
 
 ## Current limits
 
-Routing supports static paths, single-segment parameters, and static-prefix route groups, but not catch-all parameters. Responses and request bodies are fully buffered, oversized bodies return 413, and other body decoding failures return 400. Informational statuses and successful CONNECT responses are not supported as final buffered responses. Panic recovery uses Ard's `unsafe` boundary, returns a generic 500, and does not currently capture or log a stack. Streaming, files, SSE, WebSockets, and detached request contexts are intentionally not exposed yet.
+Routing supports static paths, single-segment and catch-all parameters, and static-prefix route groups. Responses and request bodies are fully buffered, oversized bodies return 413, and other body decoding failures return 400. Informational statuses and successful CONNECT responses are not supported as final buffered responses. Panic recovery uses Ard's `unsafe` boundary, returns a generic 500, and does not currently capture or log a stack. Streaming, files, SSE, WebSockets, and detached request contexts are intentionally not exposed yet.
 
 Architecture decisions live in [`docs/`](./docs/).

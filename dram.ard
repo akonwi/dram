@@ -396,8 +396,12 @@ private fn register_route(
   validate_route(method, path)
   let segments = compile_route(path)
   for existing in app.routes {
-    if existing.method == method and route_shapes_equal(existing.segments, segments) {
-      panic("conflicting route: {method} {path}")
+    if existing.method == method {
+      let same_shape = route_shapes_equal(existing.segments, segments)
+      let catch_all_overlap = (route_has_catch_all(existing.segments) or route_has_catch_all(segments)) and route_patterns_overlap(existing.segments, segments, 0)
+      if same_shape or catch_all_overlap {
+        panic("conflicting route: {method} {path}")
+      }
     }
   }
   app.routes.push(
@@ -610,11 +614,20 @@ private struct RouteMatch {
 private fn compile_route(path: Str) [RouteSegment] {
   mut segments: [RouteSegment] = []
   mut parameter_names: [Str: Bool] = [:]
-  for segment in strings::Split(path, "/") {
-    if strings::HasPrefix(segment, ":") {
-      let name = strings::TrimPrefix(segment, ":")
+  let path_segments = strings::Split(path, "/")
+  for segment, index in path_segments {
+    let parameter = strings::HasPrefix(segment, ":")
+    let catch_all = strings::HasPrefix(segment, "*")
+    if parameter or catch_all {
+      let name = match catch_all {
+        true => strings::TrimPrefix(segment, "*"),
+        false => strings::TrimPrefix(segment, ":"),
+      }
       if not valid_path_param_name(name) {
         panic("invalid path parameter: {segment}")
+      }
+      if catch_all and index != path_segments.size() - 1 {
+        panic("catch-all path parameter must be the final segment: {segment}")
       }
       if parameter_names.get(name).is_some() {
         panic("duplicate path parameter: {name}")
@@ -628,6 +641,67 @@ private fn compile_route(path: Str) [RouteSegment] {
   segments
 }
 
+private fn route_segment_is_catch_all(segment: RouteSegment) Bool {
+  segment.name.is_some() and strings::HasPrefix(segment.value, "*")
+}
+
+private fn route_has_catch_all(segments: [RouteSegment]) Bool {
+  match segments.at(segments.size() - 1) {
+    segment => route_segment_is_catch_all(segment),
+    _ => false,
+  }
+}
+
+private fn route_patterns_overlap(left: [RouteSegment], right: [RouteSegment], index: Int) Bool {
+  match left.at(index) {
+    left_segment => {
+      match right.at(index) {
+        right_segment => {
+          if route_segment_is_catch_all(left_segment) or route_segment_is_catch_all(right_segment) {
+            true
+          } else if route_segments_overlap(left_segment, right_segment) {
+            route_patterns_overlap(left, right, index + 1)
+          } else {
+            false
+          }
+        },
+        _ => false,
+      }
+    },
+    _ => right.at(index).is_none(),
+  }
+}
+
+private fn route_segments_overlap(left: RouteSegment, right: RouteSegment) Bool {
+  let left_is_param = left.name.is_some()
+  let right_is_param = right.name.is_some()
+  if left_is_param and right_is_param {
+    true
+  } else if left_is_param {
+    right.value != ""
+  } else if right_is_param {
+    left.value != ""
+  } else {
+    left.value == right.value
+  }
+}
+
+private enum RouteSegmentKind {
+  Static,
+  Parameter,
+  CatchAll,
+}
+
+private fn route_segment_kind(segment: RouteSegment) RouteSegmentKind {
+  if route_segment_is_catch_all(segment) {
+    RouteSegmentKind::CatchAll
+  } else if segment.name.is_some() {
+    RouteSegmentKind::Parameter
+  } else {
+    RouteSegmentKind::Static
+  }
+}
+
 private fn route_shapes_equal(left: [RouteSegment], right: [RouteSegment]) Bool {
   if left.size() != right.size() {
     false
@@ -635,11 +709,11 @@ private fn route_shapes_equal(left: [RouteSegment], right: [RouteSegment]) Bool 
     mut equal = true
     for left_segment, index in left {
       let right_segment = right.at(index).expect("route segment index is in bounds")
-      let left_is_param = left_segment.name.is_some()
-      let right_is_param = right_segment.name.is_some()
-      if left_is_param != right_is_param {
+      let left_kind = route_segment_kind(left_segment)
+      let right_kind = route_segment_kind(right_segment)
+      if left_kind != right_kind {
         equal = false
-      } else if (not left_is_param) and left_segment.value != right_segment.value {
+      } else if left_kind == RouteSegmentKind::Static and left_segment.value != right_segment.value {
         equal = false
       }
     }
@@ -648,19 +722,35 @@ private fn route_shapes_equal(left: [RouteSegment], right: [RouteSegment]) Bool 
 }
 
 private fn match_route(route_segments: [RouteSegment], path_segments: [Str]) RouteMatch {
-  mut matches = route_segments.size() == path_segments.size()
+  let catch_all = route_has_catch_all(route_segments)
+  mut matches = match catch_all {
+    true => path_segments.size() >= route_segments.size(),
+    false => route_segments.size() == path_segments.size(),
+  }
   mut params: [Str: Str] = [:]
   if matches {
     for route_segment, index in route_segments {
-      let path_segment = path_segments.at(index).expect("path segment index is in bounds")
-      if route_segment.name.is_some() {
-        if path_segment == "" {
-          matches = false
-        } else {
-          params.set(route_segment.name.or(""), path_segment)
+      if route_segment_is_catch_all(route_segment) {
+        if matches {
+          mut remaining: [Str] = []
+          for path_segment, path_index in path_segments {
+            if path_index >= index {
+              remaining.push(path_segment)
+            }
+          }
+          params.set(route_segment.name.or(""), "/{strings::Join(remaining, "/")}")
         }
-      } else if route_segment.value != path_segment {
-        matches = false
+      } else {
+        let path_segment = path_segments.at(index).expect("path segment index is in bounds")
+        if route_segment.name.is_some() {
+          if path_segment == "" {
+            matches = false
+          } else {
+            params.set(route_segment.name.or(""), path_segment)
+          }
+        } else if route_segment.value != path_segment {
+          matches = false
+        }
       }
     }
   }
@@ -765,7 +855,7 @@ private fn validate_group_prefix(prefix: Str) {
     panic("group prefix cannot end with '/': {prefix}")
   }
   for segment in strings::Split(prefix, "/") {
-    if strings::HasPrefix(segment, ":") {
+    if strings::HasPrefix(segment, ":") or strings::HasPrefix(segment, "*") {
       panic("group prefixes cannot contain parameters: {prefix}")
     }
   }

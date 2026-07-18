@@ -122,6 +122,97 @@ test fn path_params_are_available_to_middleware_and_handlers() Void!Str {
   testing::pass()
 }
 
+test fn catch_all_params_capture_the_remaining_path() Void!Str {
+  mut app = dram::App::new()
+  app.use_middleware(
+    fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
+      response.header("X-Catch-All", request.param("path").or("missing"))
+      next.run(request, response)
+    },
+  )
+  app.get(
+    "/files/*path",
+    fn(request, response) {
+      response.text(200, request.param("path").or("missing"))
+    },
+  )
+  app.post(
+    "/files/*path",
+    fn(request, response) {
+      response.text(201, request.param("path").or("missing"))
+    },
+  )
+
+  let nested = app.handle(dram::Request::new("GET", "/files/images/logo.png"))
+  try testing::assert(Str::from(nested.body) == "/images/logo.png", "catch-all remainder changed")
+  try testing::assert(
+    nested.headers.get("X-Catch-All").or("") == "/images/logo.png",
+    "middleware missed catch-all param",
+  )
+  let root = app.handle(dram::Request::new("GET", "/files/"))
+  try testing::assert(Str::from(root.body) == "/", "empty catch-all remainder changed")
+  let prefix = app.handle(dram::Request::new("GET", "/files"))
+  try testing::assert(prefix.status == 404, "catch-all matched without its slash")
+  let other_method = app.handle(dram::Request::new("POST", "/files/archive.zip"))
+  try testing::assert(other_method.status == 201, "catch-all pattern conflicted across methods")
+  try testing::assert(Str::from(other_method.body) == "/archive.zip", "POST catch-all capture changed")
+  let escaped = app.handle(dram::Request::new("GET", "/files/images%2Flogo.png"))
+  try testing::assert(Str::from(escaped.body) == "/images/logo.png", "decoded slash was not captured")
+  let head = app.handle(dram::Request::new("HEAD", "/files/images/logo.png"))
+  try testing::assert(head.status == 200 and head.body.size() == 0, "catch-all HEAD fallback failed")
+  testing::pass()
+}
+
+test fn catch_all_routes_validate_and_reject_overlaps() Void!Str {
+  mut static_first = dram::App::new()
+  static_first.get("/files/static", fn(request, response) {})
+  let static_overlap = unsafe {
+    static_first.get("/files/*path", fn(request, response) {})
+  }
+  try testing::assert(static_overlap.is_err(), "catch-all overlapped a static route")
+
+  mut catch_all_first = dram::App::new()
+  catch_all_first.get("/files/*path", fn(request, response) {})
+  let parameter_overlap = unsafe {
+    catch_all_first.get("/files/:name", fn(request, response) {})
+  }
+  try testing::assert(parameter_overlap.is_err(), "parameter route overlapped a catch-all")
+  let trailing_overlap = unsafe {
+    catch_all_first.get("/files/", fn(request, response) {})
+  }
+  try testing::assert(trailing_overlap.is_err(), "trailing-slash route overlapped a catch-all")
+
+  let non_final = unsafe {
+    catch_all_first.get("/assets/*path/edit", fn(request, response) {})
+  }
+  try testing::assert(non_final.is_err(), "non-final catch-all was accepted")
+  let unnamed = unsafe {
+    catch_all_first.get("/assets/*", fn(request, response) {})
+  }
+  try testing::assert(unnamed.is_err(), "unnamed catch-all was accepted")
+  let duplicate_name = unsafe {
+    catch_all_first.get("/orgs/:id/files/*id", fn(request, response) {})
+  }
+  try testing::assert(duplicate_name.is_err(), "duplicate catch-all name was accepted")
+
+  mut compatible = dram::App::new()
+  compatible.get(
+    "/files",
+    fn(request, response) {
+      response.text(200, "prefix")
+    },
+  )
+  compatible.get(
+    "/files/*path",
+    fn(request, response) {
+      response.text(200, request.param("path").or(""))
+    },
+  )
+  let prefix = compatible.handle(dram::Request::new("GET", "/files"))
+  try testing::assert(Str::from(prefix.body) == "prefix", "non-overlapping prefix route was rejected")
+  testing::pass()
+}
+
 test fn query_accessors_lazily_decode_raw_queries() Void!Str {
   let query_request = dram::Request::new(
     "GET",
@@ -343,6 +434,10 @@ test fn groups_validate_prefixes_paths_and_combined_conflicts() Void!Str {
     app.group("/orgs/:id")
   }
   try testing::assert(parameter_prefix.is_err(), "parameterized group prefix was accepted")
+  let catch_all_prefix = unsafe {
+    app.group("/files/*path")
+  }
+  try testing::assert(catch_all_prefix.is_err(), "catch-all group prefix was accepted")
   let trailing_slash = unsafe {
     app.group("/api/")
   }

@@ -65,7 +65,7 @@ app.get("/users/:id", fn(request, response) {
 })
 ```
 
-Static segments outrank parameter segments. Structurally equivalent parameter patterns are rejected for the same method, and repeated parameter names within one pattern are invalid. `request.param(name)` returns `Str?` so callers can distinguish a missing parameter from an empty value.
+Static segments outrank single-segment parameters. Structurally equivalent parameter patterns are rejected for the same method, and repeated parameter names within one pattern are invalid. A final `*name` parameter captures the remaining path, including its leading slash. Catch-all patterns reject overlapping same-method static, parameter, and catch-all routes. `request.param(name)` returns `Str?` for both parameter forms so callers can distinguish a missing parameter from an empty value.
 
 `app.group(prefix)` returns a mutable group and groups may be nested. Group prefixes are static; parameters remain available in child route paths. Group middleware is snapshotted onto subsequently registered routes, with parent middleware running before child middleware. A child snapshots its parent's middleware when created, so later additions to the parent do not affect an existing child. Group middleware does not run for 404 or 405 responses because no group route was selected.
 
