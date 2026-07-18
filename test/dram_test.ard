@@ -3,6 +3,9 @@ use ard/unsafe as ard_unsafe
 
 use dram/context as request_context
 use dram/dram
+use go:net/http
+use go:net/http/httptest
+use go:strings
 
 struct ValueKey {
   id: Int,
@@ -18,6 +21,13 @@ fn str_value(request: dram::Request, key: ValueKey) Str? {
     boxed => ard_unsafe::cast<Str>(boxed),
     _ => Maybe::new(),
   }
+}
+
+fn serve_test_request(handler: http::Handler, method: Str, target: Str, body: Str) mut httptest::ResponseRecorder {
+  let recorder = httptest::NewRecorder()
+  let raw_request = httptest::NewRequest(method, target, strings::NewReader(body))
+  handler.ServeHTTP(recorder, raw_request)
+  recorder
 }
 
 fn order_middleware(label: Str) dram::Middleware {
@@ -827,6 +837,85 @@ test fn next_is_one_shot() Void!Str {
   )
   let response = app.handle(dram::Request::new("GET", "/once"))
   try testing::assert(Str::from(response.body) == "route", "Next replayed the route")
+  testing::pass()
+}
+
+test fn app_converts_to_an_isolated_standard_handler_snapshot() Void!Str {
+  mut app = dram::App::new()
+  app.set_max_body_bytes(8)
+  app.use_middleware(
+    fn(request, response, next) {
+      response.header("X-Snapshot", "before")
+      next.run(request, response)
+    },
+  )
+  app.not_found(
+    fn(request, response) {
+      response.text(404, "old fallback")
+    },
+  )
+  app.get(
+    "/before",
+    fn(request, response) {
+      response.text(200, "before")
+    },
+  )
+  app.post(
+    "/body",
+    fn(request, response) {
+      response.text(200, Str::from(request.body))
+    },
+  )
+
+  let handler: http::Handler = app
+  let server = http::Server{Addr: "127.0.0.1:0", Handler: app}
+
+  app.set_max_body_bytes(1)
+  app.use_middleware(
+    fn(request, response, next) {
+      response.header("X-Snapshot", "after")
+      next.run(request, response)
+    },
+  )
+  app.not_found(
+    fn(request, response) {
+      response.text(404, "new fallback")
+    },
+  )
+  app.get(
+    "/after",
+    fn(request, response) {
+      response.text(200, "after")
+    },
+  )
+
+  let before = serve_test_request(handler, "GET", "/before", "")
+  try testing::assert(before.Code == 200, "snapshot lost its registered route")
+  try testing::assert(before.Body.String() == "before", "snapshot route response changed")
+  try testing::assert(before.Header().Get("X-Snapshot") == "before", "snapshot middleware changed")
+
+  let after = serve_test_request(handler, "GET", "/after", "")
+  try testing::assert(after.Code == 404, "snapshot observed a later route")
+  try testing::assert(after.Body.String() == "old fallback", "snapshot fallback changed")
+
+  let body = serve_test_request(handler, "POST", "/body", "four")
+  try testing::assert(body.Code == 200, "snapshot body limit changed")
+  try testing::assert(body.Body.String() == "four", "snapshot request body changed")
+  testing::pass()
+}
+
+test fn mutable_http_handler_reference_observes_later_registration() Void!Str {
+  mut app = dram::App::new()
+  let handler: http::Handler = mut app
+  app.get(
+    "/later",
+    fn(request, response) {
+      response.text(200, "later")
+    },
+  )
+
+  let response = serve_test_request(handler, "GET", "/later", "")
+  try testing::assert(response.Code == 200, "mutable handler reference stopped sharing configuration")
   testing::pass()
 }
 

@@ -12,7 +12,7 @@ The package root provides the first buffered HTTP slice:
 - in-memory `App.handle(Request)` dispatch;
 - buffered text and byte responses with case-insensitive, multi-value headers;
 - bounded request bodies with a 1 MiB default;
-- `net/http.Server` serving with defensive timeouts through `App.listen(port, host?)`.
+- `net/http.Server` integration through `App.listen(port, host?)` or a standard `http.Handler` snapshot.
 
 ```ard
 use dram
@@ -39,6 +39,22 @@ fn main() {
 Application dependencies belong in closure captures, not request contexts. Middleware short-circuits by completing the response without calling `Next`. Route handlers never receive `Next`.
 
 The complete path-dependency example is under [`examples/hello/`](./examples/hello/).
+
+## Serving
+
+`App` implements Go's standard `http.Handler` interface. `listen` is the simple blocking entry point; applications that need custom timeouts, asynchronous startup, or graceful shutdown can use the app with their own `http.Server`:
+
+```ard
+use go:net/http
+
+mut server = http::Server{
+  Addr: "0.0.0.0:8080",
+  Handler: app,
+}
+server.ListenAndServe()
+```
+
+Assign `app` by value as shown to capture its configured state. An explicit `mut app` conversion creates a live handler reference instead; applications using that form must synchronize every registration change with request dispatch.
 
 ## Routing
 
@@ -152,7 +168,7 @@ let id = match context::value(derived, request_id_key) {
 
 `net/http` runs handlers concurrently. Each request carries its own immutable context and receives a mutable `Response`, but captured closure data may be shared by every request. Application code must synchronize shared maps, lists, mutable references, database clients, counters, and other dependencies. Request contexts, responses, and `Next` capabilities are synchronous and must not be retained or used by detached work after the handler returns.
 
-Complete route and middleware registration before calling `listen`; the server captures an immutable configuration snapshot for concurrent reads. Later registration changes do not affect that running server. Do not mutate registration concurrently with `App.handle`, which reads the application's current configuration.
+Complete route and middleware registration before calling `listen` or assigning the app by value as an `http.Handler`. Both capture the configured application value for concurrent reads, and later registration changes do not affect that running server. An explicit `mut app` handler conversion shares live configuration and must not be mutated concurrently with request dispatch. `App.handle` likewise reads the application's current configuration and must not run concurrently with registration changes.
 
 ## Development
 

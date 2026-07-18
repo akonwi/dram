@@ -22,7 +22,7 @@ Ard currently targets Go and supports direct Go package interop. Go's `net/http`
 
 ### Package and runtime boundary
 
-Build Dram as an external Ard package backed by Go's `net/http`, not as an Ard standard-library module. Keep the public API Ard-first and use small Go shims only where semantic adaptation is necessary.
+Build Dram as an external Ard package backed by Go's `net/http`, not as an Ard standard-library module. Keep the public API Ard-first and use small Go shims only where semantic adaptation is necessary. `App` implements Go's `http.Handler` so applications that own their `http.Server` lifecycle can assign the configured app directly as the server handler.
 
 ### Handlers and context
 
@@ -71,7 +71,7 @@ Static segments outrank single-segment parameters. Structurally equivalent param
 
 `app.not_found(handler)` and `app.method_not_allowed(handler)` configure application-level fallback handlers. Global middleware wraps them. The method-not-allowed response is initialized with status 405 and its generated `Allow` header before its handler runs. Without custom handlers, unmatched requests retain the default empty 404 or 405 response.
 
-Applications complete route and middleware registration before serving. `listen` captures an immutable configuration snapshot for request dispatch, so later application mutations do not affect the running server and the serving path needs no route-mutation locks. `App.handle` reads the application's current configuration and must not run concurrently with registration changes.
+Applications complete route and middleware registration before serving. `listen` captures an immutable configuration snapshot, while assigning `App` by value as an `http.Handler` captures the configured application value. Later application mutations do not affect those handlers, and the serving path needs no route-mutation locks. An explicit `mut App` interface conversion shares live configuration and requires external synchronization around registration and dispatch. `App.handle` also reads the application's current configuration and must not run concurrently with registration changes.
 
 Middleware has a distinct type and is the only code that receives a continuation:
 

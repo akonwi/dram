@@ -222,13 +222,20 @@ private struct FallbackHandlers {
   method_not_allowed: Handler?,
 }
 
-private struct ServerHandler {
-  callback: fn(http::ResponseWriter, mut http::Request),
-}
-
-impl http::Handler for ServerHandler {
+impl http::Handler for App {
   fn serve_h_t_t_p(writer: http::ResponseWriter, raw_request: mut http::Request) {
-    self.callback(writer, raw_request)
+    let fallback_handlers = FallbackHandlers{
+      not_found: self._not_found_handler,
+      method_not_allowed: self._method_not_allowed_handler,
+    }
+    serve_http(
+      self.middleware_handlers,
+      self.routes,
+      fallback_handlers,
+      self.max_body_bytes,
+      writer,
+      raw_request,
+    )
   }
 }
 
@@ -336,19 +343,15 @@ impl App {
       for route in self.routes {
         routes.push(route)
       }
-      let fallback_handlers = FallbackHandlers{
-        not_found: self._not_found_handler,
-        method_not_allowed: self._method_not_allowed_handler,
-      }
-      let max_body_bytes = self.max_body_bytes
-      let handler: http::Handler = ServerHandler{
-        callback: fn(writer: http::ResponseWriter, raw_request: mut http::Request) {
-          serve_http(middleware_handlers, routes, fallback_handlers, max_body_bytes, writer, raw_request)
-        },
-      }
       mut server = http::Server{}
       server.Addr = address
-      server.Handler = handler
+      server.Handler = App{
+        middleware_handlers: middleware_handlers,
+        routes: routes,
+        max_body_bytes: self.max_body_bytes,
+        _not_found_handler: self._not_found_handler,
+        _method_not_allowed_handler: self._method_not_allowed_handler,
+      }
       server.ReadHeaderTimeout = 5 * time::Second
       server.ReadTimeout = 30 * time::Second
       server.WriteTimeout = 30 * time::Second
