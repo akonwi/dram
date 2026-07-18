@@ -6,6 +6,7 @@ use go:io
 use go:net
 use go:net/http
 use go:net/textproto
+use go:net/url
 use go:strconv
 use go:strings
 use go:time
@@ -67,6 +68,7 @@ impl Headers {
 struct Request {
   method: Str,
   path: Str,
+  raw_query: Str,
   headers: Headers,
   body: [Byte],
   context: go_context::Context,
@@ -74,7 +76,16 @@ struct Request {
 }
 
 fn Request::new(method: Str, path: Str) Request {
-  make_request(method, path, Headers::new(), [], request_context::background(), [:])
+  let target = parse_request_target(path)
+  Request{
+    method: method,
+    path: target.path,
+    raw_query: target.raw_query,
+    headers: Headers::new(),
+    body: [],
+    context: request_context::background(),
+    path_params: [:],
+  }
 }
 
 impl Request {
@@ -90,8 +101,24 @@ impl Request {
     self.path_params.get(name)
   }
 
+  fn query(name: Str) Str? {
+    self.query_list(name).at(0)
+  }
+
+  fn query_list(name: Str) [Str] {
+    parse_query_values(self.raw_query, name)
+  }
+
   fn with_context(context: go_context::Context) Request {
-    make_request(self.method, self.path, self.headers, self.body, context, self.path_params)
+    Request{
+      method: self.method,
+      path: self.path,
+      raw_query: self.raw_query,
+      headers: self.headers,
+      body: self.body,
+      context: context,
+      path_params: self.path_params,
+    }
   }
 }
 
@@ -410,22 +437,23 @@ private fn join_group_route(prefix: Str, path: Str) Str {
   }
 }
 
-private fn make_request(
-  method: Str,
+private struct RequestTarget {
   path: Str,
-  headers: Headers,
-  body: [Byte],
-  context: go_context::Context,
-  path_params: [Str: Str],
-) Request {
-  Request{
-    method: method,
-    path: path,
-    headers: headers,
-    body: body,
-    context: context,
-    path_params: path_params,
+  raw_query: Str,
+}
+
+private fn parse_request_target(target: Str) RequestTarget {
+  match url::ParseRequestURI(target) {
+    ok(parsed) => RequestTarget{path: parsed.Path, raw_query: parsed.RawQuery},
+    err(message) => panic("invalid request target '{target}': {message}"),
   }
+}
+
+private fn parse_query_values(raw_query: Str, name: Str) [Str] {
+  mut parsed = url::URL{}
+  parsed.RawQuery = raw_query
+  let values = parsed.Query()
+  values.get(name).or([])
 }
 
 private fn make_next(callback: fn(Request, mut Response)) Next {
@@ -459,7 +487,15 @@ private fn serve_http(
           raw_request.Body.Close()
           write_http_response(writer, finalize_response(raw_request.Method, payload_too_large()))
         } else {
-          let request = make_request(raw_request.Method, raw_request.URL.Path, headers, body, raw_request.Context(), [:])
+          let request = Request{
+            method: raw_request.Method,
+            path: raw_request.URL.Path,
+            raw_query: raw_request.URL.RawQuery,
+            headers: headers,
+            body: body,
+            context: raw_request.Context(),
+            path_params: [:],
+          }
           write_http_response(writer, handle_bounded(middleware_handlers, routes, max_body_bytes, request))
         }
       },

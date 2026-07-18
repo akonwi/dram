@@ -122,6 +122,52 @@ test fn path_params_are_available_to_middleware_and_handlers() Void!Str {
   testing::pass()
 }
 
+test fn query_accessors_lazily_decode_raw_queries() Void!Str {
+  let query_request = dram::Request::new(
+    "GET",
+    "/search?q=hello+world&items=one&items=two%20words&empty=&flag&encoded=%2Fdocs%3Fa%3D1",
+  )
+  try testing::assert(query_request.path == "/search", "request path changed")
+  try testing::assert(query_request.query("q").or("") == "hello world", "plus decoding changed")
+  try testing::assert(query_request.query("empty").or("missing") == "", "empty query value was lost")
+  try testing::assert(query_request.query("flag").or("missing") == "", "bare query key was lost")
+  try testing::assert(query_request.query("encoded").or("") == "/docs?a=1", "percent decoding changed")
+  try testing::assert(query_request.query("missing").is_none(), "missing query value was present")
+  let items = query_request.query_list("items")
+  try testing::assert(items.size() == 2, "repeated query values were not preserved")
+  try testing::assert(items.at(0).or("") == "one", "first repeated query value changed")
+  try testing::assert(items.at(1).or("") == "two words", "second repeated query value changed")
+
+  let derived = query_request.with_context(request_context::background())
+  try testing::assert(derived.query("q").or("") == "hello world", "derived request lost its raw query")
+
+  mut app = dram::App::new()
+  app.get(
+    "/search",
+    fn(request, response) {
+      response.text(200, request.query("q").or("missing"))
+    },
+  )
+  let response = app.handle(query_request)
+  try testing::assert(response.status == 200, "query string affected route matching")
+  try testing::assert(Str::from(response.body) == "hello world", "handler could not read query")
+
+  let partially_malformed = dram::Request::new("GET", "/search?good=yes&bad=%zz&later=ok")
+  try testing::assert(partially_malformed.query("good").or("") == "yes", "valid leading query was lost")
+  try testing::assert(partially_malformed.query("bad").is_none(), "malformed query value was exposed")
+  try testing::assert(partially_malformed.query("later").or("") == "ok", "valid trailing query was lost")
+
+  let escaped_path = dram::Request::new("GET", "/files/hello%20world?q=yes")
+  try testing::assert(escaped_path.path == "/files/hello world", "escaped path was not decoded")
+  let escaped_slash = dram::Request::new("GET", "/files/a%2Fb?q=yes")
+  try testing::assert(escaped_slash.path == "/files/a/b", "escaped path slash was not decoded")
+  let malformed_path = unsafe {
+    dram::Request::new("GET", "/files/%zz?q=yes")
+  }
+  try testing::assert(malformed_path.is_err(), "malformed path escape was accepted")
+  testing::pass()
+}
+
 test fn static_routes_outrank_params_and_equivalent_patterns_conflict() Void!Str {
   mut app = dram::App::new()
   app.get(
@@ -363,7 +409,7 @@ test fn context_values_propagate_without_key_collisions() Void!Str {
   testing::pass()
 }
 
-test fn in_memory_context_uses_background_semantics() Void!Str {
+test fn in_memory_request_constructor_uses_background() Void!Str {
   mut app = dram::App::new()
   app.get(
     "/context",

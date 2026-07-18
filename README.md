@@ -6,7 +6,7 @@ Dram is an HTTP server framework for [Ard](https://github.com/akonwi/ard).
 
 The package root provides the first buffered HTTP slice:
 
-- immutable requests carrying Go-compatible contexts;
+- immutable requests carrying Go-compatible contexts and lazily decoded query parameters;
 - distinct route handlers and one-shot middleware `Next` capabilities;
 - static and `:name` parameter routes, nested route groups, and method-aware 404/405 responses;
 - in-memory `App.handle(Request)` dispatch;
@@ -67,6 +67,25 @@ admin.delete("/users/:id", delete_user)
 
 Group prefixes cannot contain parameters. Parent middleware runs before child middleware, and newly added group middleware applies only to subsequently registered routes. A child snapshots its parent's middleware when the child is created, so later parent additions do not affect that existing child. Group middleware does not run for 404 or 405 responses.
 
+## Query parameters
+
+Requests retain the raw query string and decode it only when an accessor is called:
+
+```ard
+let search = request.query("q")
+let tags = request.query_list("tag")
+```
+
+`query(name)` returns the first value as `Str?`; `query_list(name)` returns every repeated value. Missing names return `None` or an empty list, while a present empty value such as `?q=` returns `Some("")`. Decoding follows Go's `net/url` behavior, including percent decoding and converting `+` to a space.
+
+`Request::new` accepts a request target such as `/search?q=ard`, separates its decoded path for routing, retains the raw query for lazy decoding, and uses a background context:
+
+```ard
+let request = dram::Request::new("GET", "/search?q=ard")
+```
+
+Callers that need custom headers, bodies, or initial contexts may instantiate `Request` directly. Initialize `path_params` as empty; the router replaces it when selecting a parameterized route.
+
 ## Context API
 
 Like Go's `net/http`, each `Request` owns a Go `context.Context` interface value:
@@ -79,7 +98,7 @@ Like Go's `net/http`, each `Request` owns a Go `context.Context` interface value
 - `context::with_value(parent, key, value) context::Context`
 - `context::value(context, key) Any?`
 
-In-memory requests start from `context.Background()`. Network requests wrap `http.Request.Context()`.
+Requests created with `Request::new` use `context::background()`. Directly instantiated requests use their supplied context, while network requests wrap `http.Request.Context()`.
 
 Context values follow Go's dynamic key/value model. Keys must be comparable and should use application-owned types rather than strings. Applications should provide typed accessor functions that perform the `Any` cast in one place:
 

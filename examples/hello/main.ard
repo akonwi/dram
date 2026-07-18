@@ -26,6 +26,13 @@ fn main() {
     },
   )
 
+  app.get(
+    "/search",
+    fn(request, response) {
+      response.text(200, request.query("q").or(""))
+    },
+  )
+
   app.post(
     "/echo",
     fn(request: dram::Request, response: mut dram::Response) {

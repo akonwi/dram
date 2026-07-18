@@ -36,6 +36,8 @@ As in Go's `net/http`, each `Request` owns a request-scoped `Context`. `request.
 
 Applications provide dependencies by capturing them in handler and middleware closures. Context values follow Go's dynamic key/value model through the `dram/context` module. Keys must be comparable, should use application-owned types to avoid collisions, and values are retrieved as `Any?`. Applications should define typed accessor functions rather than spreading casts through handlers. Dram does not provide string-keyed storage.
 
+Requests retain the raw URL query rather than a persistent decoded map. `request.query(name) Str?` and `request.query_list(name) [Str]` decode on demand using Go's `net/url` semantics. Repeated values are preserved, and the optional single-value accessor distinguishes a missing name from a present empty value.
+
 Expected failures must be represented by completing the response with an appropriate HTTP status and body. Only server lifecycle operations, such as starting or stopping a listener, return `Result` values.
 
 ### Response lifecycle

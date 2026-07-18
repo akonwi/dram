@@ -30,6 +30,10 @@ done
 head_size="$(curl -sS -I -o /dev/null -w '%{size_download}' http://127.0.0.1:8080/)"
 [[ "$head_size" == "0" ]]
 
+code="$(curl -sS -o "$body" -w '%{http_code}' 'http://127.0.0.1:8080/search?q=hello+world')"
+[[ "$code" == "200" ]]
+[[ "$(cat "$body")" == "hello world" ]]
+
 code="$(curl -sS -D "$headers" -o "$body" -w '%{http_code}' -X POST --data-binary 'hello' http://127.0.0.1:8080/echo)"
 [[ "$code" == "200" ]]
 [[ "$(cat "$body")" == "hello" ]]
