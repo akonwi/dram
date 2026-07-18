@@ -8,8 +8,7 @@ This checklist collects the planned and incomplete work described by the accepte
 
 ## Response architecture
 
-- [ ] Introduce an explicit internal response delivery mode.
-- [ ] Ensure response helpers consistently replace an earlier uncommitted delivery selection.
+- [ ] When adding the first non-buffered response, model delivery as one internal state that each response helper replaces.
 
 ## Buffered response helpers
 
