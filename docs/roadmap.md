@@ -4,7 +4,6 @@ This checklist collects the planned and incomplete work described by the accepte
 
 ## Routing
 
-- [ ] Add application-level custom not-found and method-not-allowed handlers.
 
 ## Request context
 

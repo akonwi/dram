@@ -69,6 +69,8 @@ Static segments outrank single-segment parameters. Structurally equivalent param
 
 `app.group(prefix)` returns a mutable group and groups may be nested. Group prefixes are static; parameters remain available in child route paths. Group middleware is snapshotted onto subsequently registered routes, with parent middleware running before child middleware. A child snapshots its parent's middleware when created, so later additions to the parent do not affect an existing child. Group middleware does not run for 404 or 405 responses because no group route was selected.
 
+`app.not_found(handler)` and `app.method_not_allowed(handler)` configure application-level fallback handlers. Global middleware wraps them. The method-not-allowed response is initialized with status 405 and its generated `Allow` header before its handler runs. Without custom handlers, unmatched requests retain the default empty 404 or 405 response.
+
 Applications complete route and middleware registration before serving. `listen` captures an immutable configuration snapshot for request dispatch, so later application mutations do not affect the running server and the serving path needs no route-mutation locks. `App.handle` reads the application's current configuration and must not run concurrently with registration changes.
 
 Middleware has a distinct type and is the only code that receives a continuation:

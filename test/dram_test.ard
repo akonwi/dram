@@ -84,6 +84,85 @@ test fn middleware_runs_for_not_found_and_method_not_allowed() Void!Str {
   testing::pass()
 }
 
+test fn custom_not_found_and_method_not_allowed_handlers_run_with_global_middleware() Void!Str {
+  mut app = dram::App::new()
+  app.use_middleware(
+    fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
+      response.header("X-Global", "yes")
+      next.run(request, response)
+    },
+  )
+  app.not_found(
+    fn(request, response) {
+      response.text(response.status, "missing:{request.path}")
+    },
+  )
+  app.method_not_allowed(
+    fn(request, response) {
+      response.text(response.status, "method:{request.param("id").or("missing")}")
+    },
+  )
+
+  mut api = app.group("/api")
+  api.use_middleware(
+    fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
+      response.header("X-Group", "yes")
+      next.run(request, response)
+    },
+  )
+  api.get(
+    "/users/:id",
+    fn(request, response) {
+      response.text(200, request.param("id").or(""))
+    },
+  )
+
+  let missing = app.handle(dram::Request::new("GET", "/api/missing"))
+  try testing::assert(missing.status == 404, "custom not-found status changed")
+  try testing::assert(
+    Str::from(missing.body) == "missing:/api/missing",
+    "custom not-found handler did not run",
+  )
+  try testing::assert(
+    missing.headers.get("X-Global").or("") == "yes",
+    "global middleware skipped fallback",
+  )
+  try testing::assert(
+    missing.headers.get("X-Group").is_none(),
+    "group middleware wrapped not-found handler",
+  )
+
+  let wrong_method = app.handle(dram::Request::new("POST", "/api/users/42"))
+  try testing::assert(wrong_method.status == 405, "custom method-not-allowed status changed")
+  try testing::assert(
+    Str::from(wrong_method.body) == "method:missing",
+    "method fallback received route params",
+  )
+  try testing::assert(
+    wrong_method.headers.get("Allow").or("") == "GET, HEAD",
+    "method fallback lost Allow",
+  )
+  try testing::assert(
+    wrong_method.headers.get("X-Global").or("") == "yes",
+    "global middleware skipped 405",
+  )
+  try testing::assert(
+    wrong_method.headers.get("X-Group").is_none(),
+    "group middleware wrapped 405 handler",
+  )
+
+  let head_missing = app.handle(dram::Request::new("HEAD", "/missing"))
+  try testing::assert(
+    head_missing.status == 404 and head_missing.body.size() == 0,
+    "HEAD fallback body was sent",
+  )
+  try testing::assert(
+    head_missing.headers.get("Content-Length").or("0") != "0",
+    "HEAD fallback length was lost",
+  )
+  testing::pass()
+}
+
 test fn path_params_are_available_to_middleware_and_handlers() Void!Str {
   mut app = dram::App::new()
   app.use_middleware(

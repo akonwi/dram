@@ -8,7 +8,7 @@ The package root provides the first buffered HTTP slice:
 
 - immutable requests carrying Go-compatible contexts and lazily decoded query parameters;
 - distinct route handlers and one-shot middleware `Next` capabilities;
-- static, `:name`, and final-segment `*name` routes, nested route groups, and method-aware 404/405 responses;
+- static, `:name`, and final-segment `*name` routes, nested route groups, and customizable 404/405 responses;
 - in-memory `App.handle(Request)` dispatch;
 - buffered text and byte responses with case-insensitive, multi-value headers;
 - bounded request bodies with a 1 MiB default;
@@ -76,6 +76,20 @@ admin.delete("/users/:id", delete_user)
 ```
 
 Group prefixes cannot contain parameters. Parent middleware runs before child middleware, and newly added group middleware applies only to subsequently registered routes. A child snapshots its parent's middleware when the child is created, so later parent additions do not affect that existing child. Group middleware does not run for 404 or 405 responses.
+
+Application-level fallback handlers customize unmatched paths and method mismatches:
+
+```ard
+app.not_found(fn(request, response) {
+  response.text(404, "Page not found")
+})
+
+app.method_not_allowed(fn(request, response) {
+  response.text(405, "Method not allowed")
+})
+```
+
+Global middleware wraps fallback handlers. Group middleware does not run because no group route was selected. The method-not-allowed handler receives a response already set to 405 with its generated `Allow` header.
 
 ## Query parameters
 

@@ -205,6 +205,13 @@ struct App {
   middleware_handlers: [Middleware],
   routes: [Route],
   max_body_bytes: Int,
+  _not_found_handler: Handler?,
+  _method_not_allowed_handler: Handler?,
+}
+
+private struct FallbackHandlers {
+  not_found: Handler?,
+  method_not_allowed: Handler?,
 }
 
 private struct ServerHandler {
@@ -224,6 +231,8 @@ fn App::new() App {
     middleware_handlers: middleware_handlers,
     routes: routes,
     max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+    _not_found_handler: Maybe::new(),
+    _method_not_allowed_handler: Maybe::new(),
   }
 }
 
@@ -237,6 +246,14 @@ impl App {
 
   fn mut use_middleware(middleware: Middleware) {
     self.middleware_handlers.push(middleware)
+  }
+
+  fn mut not_found(handler: Handler) {
+    self._not_found_handler = Maybe::new(handler)
+  }
+
+  fn mut method_not_allowed(handler: Handler) {
+    self._method_not_allowed_handler = Maybe::new(handler)
   }
 
   fn mut route(method: Str, path: Str, handler: Handler) {
@@ -285,7 +302,17 @@ impl App {
   }
 
   fn handle(request: Request) Response {
-    handle_bounded(self.middleware_handlers, self.routes, self.max_body_bytes, request)
+    let fallback_handlers = FallbackHandlers{
+      not_found: self._not_found_handler,
+      method_not_allowed: self._method_not_allowed_handler,
+    }
+    handle_bounded(
+      self.middleware_handlers,
+      self.routes,
+      fallback_handlers,
+      self.max_body_bytes,
+      request,
+    )
   }
 
   fn listen(port: Int, host: Str?) Void!Str {
@@ -301,10 +328,14 @@ impl App {
       for route in self.routes {
         routes.push(route)
       }
+      let fallback_handlers = FallbackHandlers{
+        not_found: self._not_found_handler,
+        method_not_allowed: self._method_not_allowed_handler,
+      }
       let max_body_bytes = self.max_body_bytes
       let handler: http::Handler = ServerHandler{
         callback: fn(writer: http::ResponseWriter, raw_request: mut http::Request) {
-          serve_http(middleware_handlers, routes, max_body_bytes, writer, raw_request)
+          serve_http(middleware_handlers, routes, fallback_handlers, max_body_bytes, writer, raw_request)
         },
       }
       mut server = http::Server{}
@@ -469,6 +500,7 @@ private fn make_next(callback: fn(Request, mut Response)) Next {
 private fn serve_http(
   middleware_handlers: [Middleware],
   routes: [Route],
+  fallback_handlers: FallbackHandlers,
   max_body_bytes: Int,
   writer: http::ResponseWriter,
   raw_request: mut http::Request,
@@ -500,7 +532,10 @@ private fn serve_http(
             context: raw_request.Context(),
             path_params: [:],
           }
-          write_http_response(writer, handle_bounded(middleware_handlers, routes, max_body_bytes, request))
+          write_http_response(
+            writer,
+            handle_bounded(middleware_handlers, routes, fallback_handlers, max_body_bytes, request),
+          )
         }
       },
       err(_) => write_http_response(writer, finalize_response(raw_request.Method, bad_request())),
@@ -511,26 +546,40 @@ private fn serve_http(
 private fn handle_bounded(
   middleware_handlers: [Middleware],
   routes: [Route],
+  fallback_handlers: FallbackHandlers,
   max_body_bytes: Int,
   request: Request,
 ) Response {
   if request.body.size() > max_body_bytes {
     finalize_response(request.method, payload_too_large())
   } else {
-    finalize_response(request.method, handle_safely(middleware_handlers, routes, request))
+    finalize_response(
+      request.method,
+      handle_safely(middleware_handlers, routes, fallback_handlers, request),
+    )
   }
 }
 
-private fn handle_safely(middleware_handlers: [Middleware], routes: [Route], request: Request) Response {
+private fn handle_safely(
+  middleware_handlers: [Middleware],
+  routes: [Route],
+  fallback_handlers: FallbackHandlers,
+  request: Request,
+) Response {
   match unsafe {
-    handle_request(middleware_handlers, routes, request)
+    handle_request(middleware_handlers, routes, fallback_handlers, request)
   } {
     ok(response) => response,
     err(_) => internal_server_error(),
   }
 }
 
-private fn handle_request(middleware_handlers: [Middleware], routes: [Route], request: Request) Response {
+private fn handle_request(
+  middleware_handlers: [Middleware],
+  routes: [Route],
+  fallback_handlers: FallbackHandlers,
+  request: Request,
+) Response {
   mut response = Response::new()
   mut route_index = -1
   mut route_params: [Str: Str] = [:]
@@ -566,29 +615,32 @@ private fn handle_request(middleware_handlers: [Middleware], routes: [Route], re
     allowed_methods = append_unique(allowed_methods, "HEAD")
   }
 
-  if path_found and route_index == -1 {
+  mut selected_handler: Handler? = Maybe::new()
+  mut selected_middleware = copy_middleware(middleware_handlers)
+  if route_index >= 0 {
+    let matched_route = routes.at(route_index).expect("matched route index is in bounds")
+    selected_handler = Maybe::new(matched_route.handler)
+    for middleware in matched_route.middleware_handlers {
+      selected_middleware.push(middleware)
+    }
+  } else if path_found {
     response.status = 405
     response.headers.set("Allow", strings::Join(allowed_methods, ", "))
+    selected_handler = fallback_handlers.method_not_allowed
+  } else {
+    selected_handler = fallback_handlers.not_found
   }
 
   mut routed_request = request
   routed_request.path_params = route_params
-  mut selected_middleware = copy_middleware(middleware_handlers)
-  if route_index >= 0 {
-    let matched_route = routes.at(route_index).expect("matched route index is in bounds")
-    for middleware in matched_route.middleware_handlers {
-      selected_middleware.push(middleware)
-    }
-  }
-  dispatch(selected_middleware, 0, routes, route_index, routed_request, response)
+  dispatch(selected_middleware, 0, selected_handler, routed_request, response)
   response
 }
 
 private fn dispatch(
   middleware_handlers: [Middleware],
   index: Int,
-  routes: [Route],
-  route_index: Int,
+  handler: Handler?,
   request: Request,
   response: mut Response,
 ) {
@@ -596,13 +648,15 @@ private fn dispatch(
     let middleware = middleware_handlers.at(index).expect("middleware index is in bounds")
     let next = make_next(
       fn(next_request: Request, next_response: mut Response) {
-        dispatch(middleware_handlers, index + 1, routes, route_index, next_request, next_response)
+        dispatch(middleware_handlers, index + 1, handler, next_request, next_response)
       },
     )
     middleware(request, response, next)
-  } else if route_index >= 0 {
-    let matched_route = routes.at(route_index).expect("matched route index is in bounds")
-    matched_route.handler(request, response)
+  } else {
+    match handler {
+      selected => selected(request, response),
+      _ => (),
+    }
   }
 }
 
