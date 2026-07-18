@@ -2,13 +2,9 @@
 
 This checklist collects the planned and incomplete work described by the accepted ADRs. It is an inventory, not a priority order. Completed features are documented in the root README and are intentionally omitted here.
 
-## Routing
-
-
 ## Request context
 
 - [ ] Evaluate convenience helpers for deriving contexts with cancellation, deadlines, and timeouts.
-- [ ] Add a detached, read-only request snapshot only if a concrete background-work use case requires one.
 
 ## Response architecture
 
