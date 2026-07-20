@@ -259,7 +259,7 @@ impl App {
     self.max_body_bytes = max_body_bytes
   }
 
-  fn mut use_middleware(middleware: Middleware) {
+  fn mut use(middleware: Middleware) {
     self.middleware_handlers.push(middleware)
   }
 
@@ -369,7 +369,7 @@ struct Group {
 }
 
 impl Group {
-  fn mut use_middleware(middleware: Middleware) {
+  fn mut use(middleware: Middleware) {
     mut middleware_handlers = copy_middleware(self._middleware_handlers)
     middleware_handlers.push(middleware)
     self._middleware_handlers = middleware_handlers

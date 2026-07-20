@@ -3,7 +3,7 @@ use dram
 fn main() {
   mut app = dram::App::new()
   app.set_max_body_bytes(8)
-  app.use_middleware(
+  app.use(
     fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
       response.header("X-Powered-By", "Dram")
       next.run(request, response)

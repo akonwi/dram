@@ -41,7 +41,7 @@ fn order_middleware(label: Str) dram::Middleware {
 test fn exact_route_uses_captured_dependency_and_middleware() Void!Str {
   let greeting = "Hello"
   mut app = dram::App::new()
-  app.use_middleware(
+  app.use(
     fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
       response.header("X-Middleware", "before")
       next.run(request, response)
@@ -49,7 +49,7 @@ test fn exact_route_uses_captured_dependency_and_middleware() Void!Str {
       response.body = "{Str::from(response.body)} outer".bytes()
     },
   )
-  app.use_middleware(
+  app.use(
     fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
       next.run(request, response)
       response.body = "{Str::from(response.body)} inner".bytes()
@@ -75,7 +75,7 @@ test fn exact_route_uses_captured_dependency_and_middleware() Void!Str {
 
 test fn middleware_runs_for_not_found_and_method_not_allowed() Void!Str {
   mut app = dram::App::new()
-  app.use_middleware(
+  app.use(
     fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
       response.header("X-Middleware", "yes")
       next.run(request, response)
@@ -101,7 +101,7 @@ test fn middleware_runs_for_not_found_and_method_not_allowed() Void!Str {
 
 test fn custom_not_found_and_method_not_allowed_handlers_run_with_global_middleware() Void!Str {
   mut app = dram::App::new()
-  app.use_middleware(
+  app.use(
     fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
       response.header("X-Global", "yes")
       next.run(request, response)
@@ -119,7 +119,7 @@ test fn custom_not_found_and_method_not_allowed_handlers_run_with_global_middlew
   )
 
   mut api = app.group("/api")
-  api.use_middleware(
+  api.use(
     fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
       response.header("X-Group", "yes")
       next.run(request, response)
@@ -180,7 +180,7 @@ test fn custom_not_found_and_method_not_allowed_handlers_run_with_global_middlew
 
 test fn path_params_are_available_to_middleware_and_handlers() Void!Str {
   mut app = dram::App::new()
-  app.use_middleware(
+  app.use(
     fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
       response.header("X-User-Id", request.param("id").or(""))
       next.run(request, response)
@@ -218,7 +218,7 @@ test fn path_params_are_available_to_middleware_and_handlers() Void!Str {
 
 test fn catch_all_params_capture_the_remaining_path() Void!Str {
   mut app = dram::App::new()
-  app.use_middleware(
+  app.use(
     fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
       response.header("X-Catch-All", request.param("path").or("missing"))
       next.run(request, response)
@@ -403,7 +403,7 @@ test fn static_routes_outrank_params_and_equivalent_patterns_conflict() Void!Str
 
 test fn groups_compose_static_prefixes_and_snapshot_middleware() Void!Str {
   mut app = dram::App::new()
-  app.use_middleware(order_middleware("global,"))
+  app.use(order_middleware("global,"))
 
   mut api = app.group("/api")
   api.get(
@@ -412,7 +412,7 @@ test fn groups_compose_static_prefixes_and_snapshot_middleware() Void!Str {
       response.text(200, "before")
     },
   )
-  api.use_middleware(order_middleware("parent,"))
+  api.use(order_middleware("parent,"))
   api.get(
     "/after",
     fn(request, response) {
@@ -421,7 +421,7 @@ test fn groups_compose_static_prefixes_and_snapshot_middleware() Void!Str {
   )
 
   mut admin = api.group("/admin")
-  admin.use_middleware(order_middleware("child,"))
+  admin.use(order_middleware("child,"))
   admin.get(
     "/users/:id",
     fn(request, response) {
@@ -429,7 +429,7 @@ test fn groups_compose_static_prefixes_and_snapshot_middleware() Void!Str {
     },
   )
 
-  api.use_middleware(order_middleware("late,"))
+  api.use(order_middleware("late,"))
   api.get(
     "/late",
     fn(request, response) {
@@ -485,14 +485,14 @@ test fn groups_compose_static_prefixes_and_snapshot_middleware() Void!Str {
 test fn copied_groups_isolate_middleware_snapshots() Void!Str {
   mut app = dram::App::new()
   mut base = app.group("/copy")
-  base.use_middleware(order_middleware("one,"))
-  base.use_middleware(order_middleware("two,"))
-  base.use_middleware(order_middleware("three,"))
+  base.use(order_middleware("one,"))
+  base.use(order_middleware("two,"))
+  base.use(order_middleware("three,"))
 
   mut left = base
   mut right = base
-  left.use_middleware(order_middleware("left,"))
-  right.use_middleware(order_middleware("right,"))
+  left.use(order_middleware("left,"))
+  right.use(order_middleware("right,"))
   left.get(
     "/left",
     fn(request, response) {
@@ -553,7 +553,7 @@ test fn groups_validate_prefixes_paths_and_combined_conflicts() Void!Str {
 
 test fn middleware_short_circuits_by_omitting_next() Void!Str {
   mut app = dram::App::new()
-  app.use_middleware(
+  app.use(
     fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
       response.text(401, "Unauthorized")
     },
@@ -575,7 +575,7 @@ test fn context_values_propagate_without_key_collisions() Void!Str {
   let first_key = ValueKey{id: 1}
   let second_key = ValueKey{id: 2}
   mut app = dram::App::new()
-  app.use_middleware(
+  app.use(
     fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
       let derived = request_context::with_value(request.context(), first_key, "first")
       next.run(request.with_context(derived), response)
@@ -822,7 +822,7 @@ test fn custom_methods_and_duplicate_validation() Void!Str {
 
 test fn next_is_one_shot() Void!Str {
   mut app = dram::App::new()
-  app.use_middleware(
+  app.use(
     fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
       next.run(request, response)
       next.run(request, response)
@@ -843,7 +843,7 @@ test fn next_is_one_shot() Void!Str {
 test fn app_converts_to_an_isolated_standard_handler_snapshot() Void!Str {
   mut app = dram::App::new()
   app.set_max_body_bytes(8)
-  app.use_middleware(
+  app.use(
     fn(request, response, next) {
       response.header("X-Snapshot", "before")
       next.run(request, response)
@@ -871,7 +871,7 @@ test fn app_converts_to_an_isolated_standard_handler_snapshot() Void!Str {
   let server = http::Server{Addr: "127.0.0.1:0", Handler: app}
 
   app.set_max_body_bytes(1)
-  app.use_middleware(
+  app.use(
     fn(request, response, next) {
       response.header("X-Snapshot", "after")
       next.run(request, response)

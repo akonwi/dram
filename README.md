@@ -1,6 +1,7 @@
 # Dram
 
 Dram is an HTTP server framework for [Ard](https://github.com/akonwi/ard).
+Current main requires the latest `ard-dev` parser so middleware can be registered with the `use` method.
 
 ## Current package
 
@@ -24,7 +25,7 @@ struct Greeter {
 fn main() {
   let greeter = Greeter{greeting: "Hello"}
   mut app = dram::App::new()
-  app.use_middleware(fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
+  app.use(fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
     response.header("X-Powered-By", "Dram")
     next.run(request, response)
   })
@@ -83,11 +84,11 @@ Groups compose static path prefixes and middleware:
 
 ```ard
 mut api = app.group("/api")
-api.use_middleware(authenticate)
+api.use(authenticate)
 api.get("/users/:id", show_user)
 
 mut admin = api.group("/admin")
-admin.use_middleware(require_admin)
+admin.use(require_admin)
 admin.delete("/users/:id", delete_user)
 ```
 
