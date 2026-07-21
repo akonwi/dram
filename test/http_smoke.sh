@@ -8,7 +8,7 @@ headers="${TMPDIR:-/tmp}/dram-hello-smoke.headers"
 body="${TMPDIR:-/tmp}/dram-hello-smoke.body"
 
 cd "$root"
-ard-dev build examples/hello/main.ard --out "$binary"
+ard build examples/hello/main.ard --out "$binary"
 "$binary" >"$log" 2>&1 &
 pid=$!
 cleanup() {

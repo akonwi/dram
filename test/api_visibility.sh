@@ -32,7 +32,7 @@ fn continue_from_route(request: dram::Request, response: mut dram::Response) {
 fn main() {}
 EOF
 
-if ard-dev check "$project/main.ard" >"$project/output" 2>&1; then
+if ard check "$project/main.ard" >"$project/output" 2>&1; then
   echo "opaque Dram internals were externally mutable" >&2
   exit 1
 fi

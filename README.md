@@ -1,7 +1,7 @@
 # Dram
 
 Dram is an HTTP server framework for [Ard](https://github.com/akonwi/ard).
-Current main requires the latest `ard-dev` parser so middleware can be registered with the `use` method.
+Current main requires Ard 0.30.0 or newer so middleware can be registered with the `use` method.
 
 ## Current package
 
@@ -173,18 +173,16 @@ Complete route and middleware registration before calling `listen` or assigning 
 
 ## Development
 
-The independent projects under `examples/` have their own manifests, so run root-package tests against the root test directory explicitly:
+Run the root checks with Ard 0.30.0 or newer:
 
 ```sh
-ard-dev format dram.ard context.ard
-ard-dev check dram.ard
-ard-dev test test
+ard format dram.ard context.ard
+ard check dram.ard
+ard test
 ./test/api_visibility.sh
 ./test/http_smoke.sh
-ard-dev build examples/hello/main.ard --out /tmp/dram-hello
+ard build examples/hello/main.ard --out /tmp/dram-hello
 ```
-
-The compiler probe under [`examples/feasibility/`](./examples/feasibility/) remains isolated from the root package.
 
 ## Current limits
 

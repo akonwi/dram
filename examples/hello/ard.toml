@@ -1,5 +1,5 @@
 name = "dram_hello"
-ard = ">= 0.1.0"
+ard = ">= 0.30.0"
 
 [dependencies]
 dram = { path = "../.." }
