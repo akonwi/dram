@@ -1,0 +1,77 @@
+use dram
+use go:dram_ai_chat/ffi
+use go:dram_ai_chat/ffi/web
+use go:fmt
+use go:os
+
+fn main() {
+  let api_key = os::Getenv("OPENAI_API_KEY")
+  if api_key == "" {
+    panic("OPENAI_API_KEY is required")
+  }
+
+  let openai = ffi::NewClient(api_key)
+  mut app = dram::App::new()
+  app.set_max_body_bytes(32 * 1024)
+
+  app.get(
+    "/",
+    fn(request, response) {
+      response.data(200, "text/html; charset=utf-8", web::IndexHTML().bytes())
+    },
+  )
+
+  app.post(
+    "/chat",
+    fn(request, response) {
+      if request.header("Content-Type").or("") != "application/json" {
+        response.text(415, "Content-Type must be application/json")
+      } else if request.header("X-Dram-Chat").or("") != "1" {
+        response.text(403, "Missing chat request header")
+      } else {
+        mut body = request.body
+        match ffi::ParseChatRequest(body) {
+          ok(chat) => {
+            response.sse(
+              fn(stream) {
+                let completion = openai.Stream(
+                  request.context(),
+                  chat.Prompt,
+                  chat.PreviousResponseID,
+                )
+                defer completion.Close()
+
+                mut connected = true
+                while connected and completion.Next() {
+                  connected = stream.send(data: completion.Delta(), event: "delta")
+                }
+
+                if connected {
+                  match completion.Err() {
+                    ok => stream.send(
+                      data: completion.ResponseID(),
+                      event: "done",
+                    ),
+                    err(message) => {
+                      fmt::Println("OpenAI stream failed: {message}")
+                      if not stream.cancelled() {
+                        stream.send(
+                          data: "OpenAI could not complete the response",
+                          event: "error",
+                        )
+                      }
+                    },
+                  }
+                }
+              },
+            )
+          },
+          err(message) => response.text(400, message),
+        }
+      }
+    },
+  )
+
+  fmt::Println("Starting Dram AI Chat at http://127.0.0.1:8080")
+  app.listen(8080).expect("Failed to start server")
+}

@@ -48,13 +48,13 @@ fn main() {
     "/events",
     fn(request, response) {
       response.sse(
-        fn(events) {
+        fn(stream) {
           active_event_streams.Add(Int64::from(1))
           defer active_event_streams.Add(Int64::from(-1))
           mut message = 1
-          while not events.cancelled() {
+          while not stream.cancelled() {
             let value = strconv::Itoa(message)
-            if not events.send(data: "message {value}", event: "message", id: value) {
+            if not stream.send(data: "message {value}", event: "message", id: value) {
               break
             }
             message =+ 1
@@ -76,8 +76,8 @@ fn main() {
     "/events/panic",
     fn(request, response) {
       response.sse(
-        fn(events) {
-          events.send(data: "visible")
+        fn(stream) {
+          stream.send(data: "visible")
           time::Sleep(50 * time::Millisecond)
           panic("after SSE commitment")
         },
