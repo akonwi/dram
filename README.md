@@ -40,7 +40,10 @@ fn main() {
 
 Application dependencies belong in closure captures, not request contexts. Middleware short-circuits by completing the response without calling `Next`. Route handlers never receive `Next`.
 
-The complete path-dependency example is under [`examples/hello/`](./examples/hello/).
+Examples:
+
+- [`examples/hello/`](./examples/hello/) covers routing, middleware, response helpers, and basic SSE.
+- [`examples/ai-chat/`](./examples/ai-chat/) streams OpenAI output through Dram SSE to a Mica-based chat UI.
 
 ## Serving
 
@@ -175,9 +178,9 @@ app.get(
   "/events",
   fn(request, response) {
     response.sse(
-      fn(events) {
-        while not events.cancelled() {
-          if not events.send(data: "hello", event: "message", id: "42", retry_ms: 1500) {
+      fn(stream) {
+        while not stream.cancelled() {
+          if not stream.send(data: "hello", event: "message", id: "42", retry_ms: 1500) {
             break
           }
         }
@@ -187,7 +190,7 @@ app.get(
 )
 ```
 
-`events.send` formats multiline data, optional event names, IDs, and non-negative retry milliseconds, then flushes the event. `events.comment(text)` writes and flushes an SSE comment for application-managed heartbeats. Both return `false` after cancellation or a transport failure. Event names and IDs reject CR, LF, and NUL characters.
+`stream.send` formats multiline data, optional event names, IDs, and non-negative retry milliseconds, then flushes the event. `stream.comment(text)` writes and flushes an SSE comment for application-managed heartbeats. Both return `false` after cancellation or a transport failure. Event names and IDs reject CR, LF, and NUL characters.
 
 The first event or comment commits the status and headers. A panic before commitment becomes Dram's generic 500 response; a panic after commitment aborts the stream without replacing output already sent. A callback that returns without sending still completes an empty SSE response. `HEAD` sends the corresponding headers without running the callback. Selecting a buffered response helper after `sse` replaces the stream.
 
@@ -212,6 +215,8 @@ ard test
 ./test/api_visibility.sh
 ./test/http_smoke.sh
 ard build examples/hello/main.ard --out /tmp/dram-hello
+ard build examples/ai-chat/main.ard --out /tmp/dram-ai-chat
+(cd examples/ai-chat && go test ./...)
 ```
 
 ## Current limits

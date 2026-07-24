@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dram AI Chat</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@akonwi/mica@0.1/mica.css">
+  <style>
+    html,
+    body {
+      block-size: 100%;
+    }
+
+    body {
+      margin: 0;
+      overflow: hidden;
+    }
+
+    .app {
+      block-size: 100dvh;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+    }
+
+    .app-header,
+    .composer {
+      background: var(--color-surface);
+      padding-block: var(--space-sm);
+    }
+
+    .app-header {
+      border-block-end: 1px solid var(--color-border);
+    }
+
+    .composer {
+      border-block-start: 1px solid var(--color-border);
+    }
+
+    .brand {
+      margin: 0;
+      font-size: 1rem;
+    }
+
+    .model,
+    .speaker,
+    .status {
+      color: var(--color-text-muted);
+      font-size: 0.8125rem;
+    }
+
+    .transcript {
+      min-block-size: 0;
+      overflow-y: auto;
+      padding-block: var(--space-lg);
+      scroll-behavior: auto;
+    }
+
+    .empty {
+      color: var(--color-text-muted);
+      margin-block: var(--space-2xl);
+      text-align: center;
+    }
+
+    .request-error {
+      color: var(--color-danger-text);
+      margin: 0;
+    }
+
+    .message {
+      border: 1px solid var(--color-border);
+      max-inline-size: min(85%, var(--size-xl));
+      overflow-wrap: anywhere;
+      padding: var(--space-sm) var(--space-md);
+    }
+
+    .message[data-role="user"] {
+      align-self: end;
+      background: var(--color-surface-raised);
+    }
+
+    .message[data-role="assistant"] {
+      align-self: start;
+    }
+
+    .message[data-state="error"] {
+      border-color: var(--color-danger-border);
+    }
+
+    .message-body {
+      margin-block-start: var(--space-2xs);
+      white-space: pre-wrap;
+    }
+
+    .composer-row {
+      align-items: end;
+    }
+
+    #prompt {
+      flex: 1 1 auto;
+      max-block-size: 10rem;
+      min-block-size: 4.5rem;
+      min-inline-size: 0;
+      resize: vertical;
+    }
+
+    .actions {
+      flex: 0 0 auto;
+    }
+
+    [hidden] {
+      display: none !important;
+    }
+
+    @media (max-width: 36rem) {
+      .model {
+        display: none;
+      }
+
+      .header-row {
+        gap: var(--space-sm);
+      }
+
+      .composer-row {
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .actions {
+        justify-content: end;
+      }
+
+      .message {
+        max-inline-size: 92%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header class="app-header">
+      <m-center max="xl" gutter="md">
+        <m-hstack class="header-row" gap="md" justify="between">
+          <m-hstack gap="sm">
+            <h1 class="brand">Dram AI Chat</h1>
+            <span class="model">gpt-4o-mini</span>
+          </m-hstack>
+          <m-hstack gap="sm">
+            <span id="status" class="status" role="status" aria-live="polite">Ready</span>
+            <button id="clear" class="ghost small" type="button" disabled>Clear</button>
+          </m-hstack>
+        </m-hstack>
+      </m-center>
+    </header>
+
+    <section id="transcript" class="transcript" aria-label="Conversation">
+      <m-center max="xl" gutter="md">
+        <m-vstack gap="md">
+          <p id="empty" class="empty">Ask a question to start a conversation.</p>
+          <m-vstack id="messages" gap="md" role="log" aria-live="polite" aria-relevant="additions"></m-vstack>
+          <p id="request-error" class="request-error" role="alert" hidden></p>
+        </m-vstack>
+      </m-center>
+    </section>
+
+    <footer class="composer">
+      <m-center max="xl" gutter="md">
+        <form id="chat-form">
+          <m-vstack gap="xs">
+            <label for="prompt">Message</label>
+            <m-hstack class="composer-row" gap="sm">
+              <textarea id="prompt" name="prompt" required maxlength="8000" placeholder="Ask anything…"></textarea>
+              <m-hstack class="actions" gap="sm">
+                <button id="stop" type="button" hidden>Stop</button>
+                <button id="send" class="primary" type="submit">Send</button>
+              </m-hstack>
+            </m-hstack>
+          </m-vstack>
+        </form>
+      </m-center>
+    </footer>
+  </main>
+
+  <template id="message-template">
+    <article class="message">
+      <div class="speaker"></div>
+      <div class="message-body"></div>
+    </article>
+  </template>
+
+  <script type="module">
+    const form = document.querySelector("#chat-form");
+    const prompt = document.querySelector("#prompt");
+    const messages = document.querySelector("#messages");
+    const template = document.querySelector("#message-template");
+    const transcript = document.querySelector("#transcript");
+    const empty = document.querySelector("#empty");
+    const status = document.querySelector("#status");
+    const requestError = document.querySelector("#request-error");
+    const send = document.querySelector("#send");
+    const stop = document.querySelector("#stop");
+    const clear = document.querySelector("#clear");
+
+    let activeRequest;
+    let previousResponseId = "";
+
+    function isNearBottom() {
+      return transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
+    }
+
+    function scrollIfPinned(pinned) {
+      if (pinned) {
+        requestAnimationFrame(() => transcript.scrollTo({ top: transcript.scrollHeight }));
+      }
+    }
+
+    function addMessage(role, text = "", busy = false) {
+      const pinned = isNearBottom();
+      const message = template.content.firstElementChild.cloneNode(true);
+      message.dataset.role = role;
+      message.ariaBusy = String(busy);
+      message.querySelector(".speaker").textContent = role === "user" ? "You" : "Assistant";
+      message.querySelector(".message-body").textContent = text;
+      messages.append(message);
+      empty.hidden = true;
+      clear.disabled = false;
+      scrollIfPinned(pinned);
+      return message;
+    }
+
+    function setStreaming(streaming) {
+      send.disabled = streaming;
+      clear.disabled = streaming || messages.childElementCount === 0;
+      stop.hidden = !streaming;
+      prompt.disabled = streaming;
+    }
+
+    function parseEvent(block) {
+      let type = "message";
+      const data = [];
+      for (const line of block.split("\n")) {
+        if (line.startsWith(":")) continue;
+        const separator = line.indexOf(":");
+        const field = separator === -1 ? line : line.slice(0, separator);
+        let value = separator === -1 ? "" : line.slice(separator + 1);
+        if (value.startsWith(" ")) value = value.slice(1);
+        if (field === "event") type = value;
+        if (field === "data") data.push(value);
+      }
+      return { type, data: data.join("\n") };
+    }
+
+    async function consumeEvents(body, onEvent) {
+      const reader = body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          buffer += decoder.decode(value, { stream: !done });
+          let boundary;
+          while ((boundary = buffer.match(/\r\n\r\n|\n\n|\r\r/))) {
+            const block = buffer.slice(0, boundary.index).replace(/\r\n|\r/g, "\n");
+            buffer = buffer.slice(boundary.index + boundary[0].length);
+            if (block !== "") onEvent(parseEvent(block));
+          }
+          if (done) break;
+        }
+      } catch (error) {
+        await reader.cancel().catch(() => {});
+        throw error;
+      } finally {
+        reader.releaseLock();
+      }
+    }
+
+    form.addEventListener("submit", async event => {
+      event.preventDefault();
+      const text = prompt.value.trim();
+      if (!text || activeRequest) return;
+
+      requestError.hidden = true;
+      const userMessage = addMessage("user", text);
+      const assistant = addMessage("assistant", "Thinking…", true);
+      const assistantBody = assistant.querySelector(".message-body");
+      let pendingDelta = "";
+      let renderedDelta = false;
+      let renderFrame;
+      let completionReceived = false;
+
+      function flushDeltas() {
+        if (renderFrame) cancelAnimationFrame(renderFrame);
+        renderFrame = undefined;
+        if (pendingDelta === "") return;
+        const pinned = isNearBottom();
+        if (!renderedDelta) assistantBody.textContent = "";
+        assistantBody.textContent += pendingDelta;
+        pendingDelta = "";
+        renderedDelta = true;
+        scrollIfPinned(pinned);
+      }
+
+      function queueDelta(delta) {
+        pendingDelta += delta;
+        if (!renderFrame) renderFrame = requestAnimationFrame(flushDeltas);
+      }
+      prompt.value = "";
+      prompt.focus();
+
+      activeRequest = new AbortController();
+      setStreaming(true);
+      status.textContent = "Assistant is responding";
+
+      try {
+        const response = await fetch("/chat", {
+          method: "POST",
+          headers: {
+            Accept: "text/event-stream",
+            "Content-Type": "application/json",
+            "X-Dram-Chat": "1",
+          },
+          body: JSON.stringify({
+            prompt: text,
+            previous_response_id: previousResponseId,
+          }),
+          signal: activeRequest.signal,
+        });
+
+        if (!response.ok) {
+          throw new Error((await response.text()) || `Request failed (${response.status})`);
+        }
+        if (!response.body) {
+          throw new Error("The response did not include a stream");
+        }
+
+        await consumeEvents(response.body, event => {
+          if (event.type === "delta") {
+            queueDelta(event.data);
+          } else if (event.type === "done") {
+            if (!event.data) throw new Error("The response ended without a conversation ID");
+            previousResponseId = event.data;
+            completionReceived = true;
+          } else if (event.type === "error") {
+            throw new Error(event.data || "OpenAI could not complete the response");
+          }
+        });
+        flushDeltas();
+        if (!completionReceived) throw new Error("The response stream ended before completion");
+        if (!renderedDelta) assistantBody.textContent = "No text was returned.";
+        status.textContent = "Response complete";
+      } catch (error) {
+        flushDeltas();
+        userMessage.remove();
+        assistant.remove();
+        prompt.value = text;
+        empty.hidden = messages.childElementCount !== 0;
+        if (error.name === "AbortError") {
+          status.textContent = "Response stopped — message restored";
+        } else {
+          status.textContent = "Request failed";
+          requestError.textContent = `${error.message} Your message is ready to retry.`;
+          requestError.hidden = false;
+        }
+      } finally {
+        assistant.ariaBusy = "false";
+        activeRequest = undefined;
+        setStreaming(false);
+        prompt.focus();
+      }
+    });
+
+    stop.addEventListener("click", () => activeRequest?.abort());
+
+    clear.addEventListener("click", () => {
+      messages.replaceChildren();
+      empty.hidden = false;
+      requestError.hidden = true;
+      clear.disabled = true;
+      previousResponseId = "";
+      status.textContent = "Ready";
+      prompt.focus();
+    });
+
+    prompt.addEventListener("keydown", event => {
+      if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        form.requestSubmit();
+      }
+    });
+  </script>
+</body>
+</html>

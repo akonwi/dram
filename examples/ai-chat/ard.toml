@@ -1,0 +1,5 @@
+name = "dram_ai_chat"
+ard = ">= 0.30.0"
+
+[dependencies]
+dram = { path = "../.." }
