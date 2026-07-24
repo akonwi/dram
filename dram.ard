@@ -123,17 +123,38 @@ impl Request {
   }
 }
 
+private enum ResponseMode {
+  Buffered,
+  SSE,
+}
+
+type SSEHandler = fn(mut EventStream)
+
+private struct ResponseState {
+  mode: ResponseMode,
+  sse_handler: SSEHandler?,
+  context: go_context::Context?,
+}
+
+private struct ResponseStore {
+  state: mut ResponseState,
+}
+
 struct Response {
   status: Int,
   headers: Headers,
   body: [Byte],
+  _store: Any,
 }
 
 fn Response::new() Response {
+  mut state = ResponseState{mode: ResponseMode::Buffered}
+  let store = ResponseStore{state: state}
   Response{
     status: 404,
     headers: Headers::new(),
     body: [],
+    _store: store,
   }
 }
 
@@ -147,6 +168,7 @@ impl Response {
   }
 
   fn mut text(status: Int, body: Str) {
+    select_buffered(self)
     self.status = status
     self.headers.set("Content-Type", "text/plain; charset=utf-8")
     self.body = body.bytes()
@@ -157,6 +179,7 @@ impl Response {
   }
 
   fn mut data(status: Int, content_type: Str, body: [Byte]) {
+    select_buffered(self)
     self.status = status
     self.headers.set("Content-Type", content_type)
     self.body = body
@@ -168,6 +191,172 @@ impl Response {
       err(message) => panic("failed to encode JSON response: {message}"),
     }
   }
+
+  fn mut sse(handler: SSEHandler) {
+    let store = response_store(self)
+    store.state.mode = ResponseMode::SSE
+    store.state.sse_handler = Maybe::new(handler)
+    self.status = 200
+    self.headers.set("Content-Type", "text/event-stream")
+    self.headers.set("Cache-Control", "no-cache")
+    self.headers.set("X-Content-Type-Options", "nosniff")
+    self.body = []
+  }
+}
+
+private fn response_store(response: Response) ResponseStore {
+  unsafe::cast<ResponseStore>(response._store).expect("invalid internal response state")
+}
+
+private fn select_buffered(response: mut Response) {
+  let store = response_store(response)
+  if store.state.mode == ResponseMode::SSE {
+    response.headers.remove("Content-Type")
+    response.headers.remove("Cache-Control")
+    response.headers.remove("X-Content-Type-Options")
+  }
+  store.state.mode = ResponseMode::Buffered
+  store.state.sse_handler = Maybe::new()
+}
+
+private struct EventStreamState {
+  writer: http::ResponseWriter,
+  context: go_context::Context,
+  transport_context: go_context::Context,
+  status: Int,
+  headers: Headers,
+  committed: Bool,
+  usable: Bool,
+}
+
+private struct EventStreamStore {
+  state: mut EventStreamState,
+}
+
+struct EventStream {
+  store: Any,
+}
+
+impl EventStream {
+  fn mut send(data: Str, event: Str?, id: Str?, retry_ms: Int?) Bool {
+    match event {
+      value => validate_sse_name("event", value),
+      _ => (),
+    }
+    match id {
+      value => validate_sse_name("id", value),
+      _ => (),
+    }
+    match retry_ms {
+      value => {
+        if value < 0 {
+          panic("SSE retry milliseconds cannot be negative")
+        }
+      },
+      _ => (),
+    }
+
+    mut fields: [Str] = []
+    match event {
+      value => fields.push("event: {value}"),
+      _ => (),
+    }
+    match id {
+      value => fields.push("id: {value}"),
+      _ => (),
+    }
+    match retry_ms {
+      value => fields.push("retry: {value}"),
+      _ => (),
+    }
+    for line in sse_lines(data) {
+      fields.push("data: {line}")
+    }
+    self.write_and_flush("{strings::Join(fields, "\n")}\n\n")
+  }
+
+  fn mut comment(text: Str) Bool {
+    mut fields: [Str] = []
+    for line in sse_lines(text) {
+      fields.push(": {line}")
+    }
+    self.write_and_flush("{strings::Join(fields, "\n")}\n\n")
+  }
+
+  fn cancelled() Bool {
+    let store = event_stream_store(self)
+    (not store.state.usable) or request_context::err(store.state.context).is_some() or request_context::err(store.state.transport_context).is_some()
+  }
+
+  private fn mut write_and_flush(body: Str) Bool {
+    let store = event_stream_store(self)
+    if (not store.state.usable) or request_context::err(store.state.context).is_some() or request_context::err(store.state.transport_context).is_some() {
+      store.state.usable = false
+      false
+    } else if not commit_event_stream(self) {
+      false
+    } else {
+      let controller = http::NewResponseController(store.state.writer)
+      match controller.SetWriteDeadline(time::Now().Add(30 * time::Second)) {
+        ok => (),
+        err(_) => (),
+      }
+      mut bytes = body.bytes()
+      let written = match store.state.writer.Write(bytes) {
+        err(_) => {
+          store.state.usable = false
+          -1
+        },
+        ok(count) => count,
+      }
+      let flushed = match written == bytes.size() {
+        false => false,
+        true => {
+          match controller.Flush() {
+            ok => true,
+            err(_) => false,
+          }
+        },
+      }
+      match controller.SetWriteDeadline(time::Time{}) {
+        ok => (),
+        err(_) => (),
+      }
+      if not flushed {
+        store.state.usable = false
+      }
+      flushed
+    }
+  }
+}
+
+private fn event_stream_store(stream: EventStream) EventStreamStore {
+  unsafe::cast<EventStreamStore>(stream.store).expect("invalid internal event stream state")
+}
+
+private fn commit_event_stream(stream: mut EventStream) Bool {
+  let store = event_stream_store(stream)
+  if store.state.committed {
+    true
+  } else if (not store.state.usable) or request_context::err(store.state.context).is_some() or request_context::err(store.state.transport_context).is_some() {
+    store.state.usable = false
+    false
+  } else {
+    copy_http_headers(store.state.writer, store.state.headers)
+    store.state.committed = true
+    store.state.writer.WriteHeader(store.state.status)
+    true
+  }
+}
+
+private fn validate_sse_name(field: Str, value: Str) {
+  if strings::Contains(value, "\r") or strings::Contains(value, "\n") or strings::Contains(value, "\x00") {
+    panic("SSE {field} cannot contain CR, LF, or NUL")
+  }
+}
+
+private fn sse_lines(value: Str) [Str] {
+  strings::Split(strings::ReplaceAll(strings::ReplaceAll(value, "\r\n", "\n"), "\r", "\n"), "\n")
 }
 
 type Handler = fn(Request, mut Response)
@@ -525,14 +714,24 @@ private fn serve_http(
 
   if raw_request.ContentLength > Int64::from(max_body_bytes) {
     raw_request.Body.Close()
-    write_http_response(writer, finalize_response(raw_request.Method, payload_too_large()))
+    deliver_http_response(
+      writer,
+      raw_request.Method,
+      raw_request.Context(),
+      finalize_response(raw_request.Method, payload_too_large()),
+    )
   } else {
     let limited_body = io::LimitReader(raw_request.Body, Int64::from(max_body_bytes) + 1)
     match io::ReadAll(limited_body) {
       ok(body) => {
         if body.size() > max_body_bytes {
           raw_request.Body.Close()
-          write_http_response(writer, finalize_response(raw_request.Method, payload_too_large()))
+          deliver_http_response(
+            writer,
+            raw_request.Method,
+            raw_request.Context(),
+            finalize_response(raw_request.Method, payload_too_large()),
+          )
         } else {
           let request = Request{
             method: raw_request.Method,
@@ -543,13 +742,20 @@ private fn serve_http(
             context: raw_request.Context(),
             path_params: [:],
           }
-          write_http_response(
+          deliver_http_response(
             writer,
+            raw_request.Method,
+            raw_request.Context(),
             handle_bounded(middleware_handlers, routes, fallback_handlers, max_body_bytes, request),
           )
         }
       },
-      err(_) => write_http_response(writer, finalize_response(raw_request.Method, bad_request())),
+      err(_) => deliver_http_response(
+        writer,
+        raw_request.Method,
+        raw_request.Context(),
+        finalize_response(raw_request.Method, bad_request()),
+      ),
     }
   }
 }
@@ -562,12 +768,19 @@ private fn handle_bounded(
   request: Request,
 ) Response {
   if request.body.size() > max_body_bytes {
-    finalize_response(request.method, payload_too_large())
+    finalize_safely(request.method, payload_too_large())
   } else {
-    finalize_response(
+    finalize_safely(
       request.method,
       handle_safely(middleware_handlers, routes, fallback_handlers, request),
     )
+  }
+}
+
+private fn finalize_safely(method: Str, response: Response) Response {
+  match unsafe { finalize_response(method, response) } {
+    ok(finalized) => finalized,
+    err(_) => finalize_response(method, internal_server_error()),
   }
 }
 
@@ -655,6 +868,7 @@ private fn dispatch(
   request: Request,
   response: mut Response,
 ) {
+  response_store(response).state.context = Maybe::new(request.context)
   if index < middleware_handlers.size() {
     let middleware = middleware_handlers.at(index).expect("middleware index is in bounds")
     let next = make_next(
@@ -863,23 +1077,36 @@ private fn valid_path_param_name(name: Str) Bool {
 }
 
 private fn finalize_response(method: Str, response: Response) Response {
-  if response.status < 200 or response.status > 599 {
-    finalize_response(method, internal_server_error())
-  } else if method == "CONNECT" and response.status >= 200 and response.status < 300 {
-    finalize_response(method, internal_server_error())
+  let store = response_store(response)
+  if store.state.mode == ResponseMode::SSE and (response.status != 200 or response.body.size() > 0) {
+    mut replacement = response
+    select_buffered(replacement)
+    finalize_response(method, replacement)
   } else {
-    mut finalized = response
-    finalized.headers.remove("Transfer-Encoding")
-    finalized.headers.remove("Trailer")
-    finalized.headers.remove("Content-Length")
+    let mode = store.state.mode
     let body_allowed = response.status != 204 and response.status != 205 and response.status != 304
-    if body_allowed {
-      finalized.headers.set("Content-Length", response.body.size().to_str())
+    if response.status < 200 or response.status > 599 {
+      finalize_response(method, internal_server_error())
+    } else if method == "CONNECT" and response.status >= 200 and response.status < 300 {
+      finalize_response(method, internal_server_error())
+    } else {
+      mut finalized = response
+      finalized.headers.remove("Transfer-Encoding")
+      finalized.headers.remove("Trailer")
+      finalized.headers.remove("Content-Length")
+      if mode == ResponseMode::Buffered and body_allowed {
+        finalized.headers.set("Content-Length", response.body.size().to_str())
+      }
+      if mode == ResponseMode::SSE {
+        finalized.headers.set("Content-Type", "text/event-stream")
+        finalized.headers.set("Cache-Control", "no-cache")
+        finalized.headers.set("X-Content-Type-Options", "nosniff")
+      }
+      if method == "HEAD" or not body_allowed or mode == ResponseMode::SSE {
+        finalized.body = []
+      }
+      finalized
     }
-    if method == "HEAD" or not body_allowed {
-      finalized.body = []
-    }
-    finalized
   }
 }
 
@@ -972,12 +1199,87 @@ private fn append_unique(values: [Str], value: Str) [Str] {
   result
 }
 
-private fn write_http_response(writer: http::ResponseWriter, response: Response) {
-  for name in response.headers.names() {
-    for value in response.headers.values(name) {
+private fn deliver_http_response(
+  writer: http::ResponseWriter,
+  method: Str,
+  request_context_value: go_context::Context,
+  response: Response,
+) {
+  let store = response_store(response)
+  if store.state.mode == ResponseMode::SSE and method != "HEAD" {
+    deliver_sse_response(
+      writer,
+      request_context_value,
+      store.state.context.or(request_context_value),
+      response,
+      store.state.sse_handler.expect("missing SSE handler"),
+    )
+  } else {
+    write_http_response(writer, response)
+  }
+}
+
+private fn deliver_sse_response(
+  writer: http::ResponseWriter,
+  transport_context: go_context::Context,
+  request_context_value: go_context::Context,
+  response: Response,
+  handler: SSEHandler,
+) {
+  mut state = EventStreamState{
+    writer: writer,
+    context: request_context_value,
+    transport_context: transport_context,
+    status: response.status,
+    headers: copy_headers(response.headers),
+    committed: false,
+    usable: true,
+  }
+  let store = EventStreamStore{state: state}
+  mut stream = EventStream{store: store}
+  let controller = http::NewResponseController(writer)
+  match controller.SetWriteDeadline(time::Time{}) {
+    ok => (),
+    err(_) => (),
+  }
+  match unsafe {
+    handler(stream)
+    commit_event_stream(stream)
+  } {
+    ok(_) => {
+      store.state.usable = false
+    },
+    err(_) => {
+      store.state.usable = false
+      if store.state.committed {
+        panic(http::ErrAbortHandler)
+      } else {
+        write_http_response(writer, finalize_response("GET", internal_server_error()))
+      }
+    },
+  }
+}
+
+private fn copy_headers(headers: Headers) Headers {
+  mut copied = Headers::new()
+  for name in headers.names() {
+    for value in headers.values(name) {
+      copied.add(name, value)
+    }
+  }
+  copied
+}
+
+private fn copy_http_headers(writer: http::ResponseWriter, headers: Headers) {
+  for name in headers.names() {
+    for value in headers.values(name) {
       writer.Header().Add(name, value)
     }
   }
+}
+
+private fn write_http_response(writer: http::ResponseWriter, response: Response) {
+  copy_http_headers(writer, response.headers)
   writer.WriteHeader(response.status)
   mut body = response.body
   writer.Write(body)

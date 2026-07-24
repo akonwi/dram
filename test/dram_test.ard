@@ -944,3 +944,203 @@ test fn panic_replaces_partial_response() Void!Str {
   try testing::assert(response.headers.get("X-Partial").is_none(), "partial headers retained")
   testing::pass()
 }
+
+test fn sse_formats_events_flushes_and_waits_for_middleware() Void!Str {
+  mut app = dram::App::new()
+  app.use(
+    fn(request, response, next) {
+      next.run(request, response)
+      response.header("X-After", "middleware")
+    },
+  )
+  app.get(
+    "/events",
+    fn(request, response) {
+      response.sse(
+        fn(events) {
+          if not events.send(data: "hello", event: "message", id: "42", retry_ms: 1500) {
+            panic("first event was not delivered")
+          }
+          if not events.send(data: "line one\r\nline two") {
+            panic("second event was not delivered")
+          }
+          if not events.comment("keepalive") {
+            panic("comment was not delivered")
+          }
+        },
+      )
+    },
+  )
+
+  let handler: http::Handler = app
+  let response = serve_test_request(handler, "GET", "/events", "")
+  try testing::assert(response.Code == 200, "SSE status changed")
+  try testing::assert(response.Header().Get("Content-Type") == "text/event-stream", "wrong SSE content type")
+  try testing::assert(response.Header().Get("Cache-Control") == "no-cache", "missing SSE cache policy")
+  try testing::assert(response.Header().Get("X-Content-Type-Options") == "nosniff", "missing sniff protection")
+  try testing::assert(response.Header().Get("Content-Length") == "", "SSE response owned content length")
+  try testing::assert(response.Header().Get("X-After") == "middleware", "SSE committed before middleware finished")
+  try testing::assert(response.Flushed, "SSE response was not flushed")
+  try testing::assert(
+    response.Body.String() == "event: message\nid: 42\nretry: 1500\ndata: hello\n\ndata: line one\ndata: line two\n\n: keepalive\n\n",
+    "SSE wire format changed",
+  )
+  testing::pass()
+}
+
+test fn sse_recovery_respects_commitment() Void!Str {
+  mut app = dram::App::new()
+  app.get(
+    "/before",
+    fn(request, response) {
+      response.sse(fn(events) { panic("before first event") })
+    },
+  )
+  app.get(
+    "/after",
+    fn(request, response) {
+      response.sse(
+        fn(events) {
+          events.send(data: "visible")
+          panic("after first event")
+        },
+      )
+    },
+  )
+
+  let handler: http::Handler = app
+  let before = serve_test_request(handler, "GET", "/before", "")
+  try testing::assert(before.Code == 500, "pre-commit panic did not become 500")
+  try testing::assert(before.Body.String() == "Internal Server Error", "pre-commit panic leaked")
+
+  let after = httptest::NewRecorder()
+  let after_request = httptest::NewRequest("GET", "/after", strings::NewReader(""))
+  let outcome = unsafe { handler.ServeHTTP(after, after_request) }
+  try testing::assert(outcome.is_err(), "post-commit panic did not abort delivery")
+  try testing::assert(after.Code == 200, "post-commit panic replaced status")
+  try testing::assert(after.Body.String() == "data: visible\n\n", "post-commit panic replaced output")
+  testing::pass()
+}
+
+test fn sse_validates_fields_before_commitment() Void!Str {
+  mut app = dram::App::new()
+  app.get(
+    "/invalid-id",
+    fn(request, response) {
+      response.sse(fn(events) { events.send(data: "hidden", id: "bad\nid") })
+    },
+  )
+  app.get(
+    "/invalid-retry",
+    fn(request, response) {
+      response.sse(fn(events) { events.send(data: "hidden", retry_ms: -1) })
+    },
+  )
+
+  let handler: http::Handler = app
+  let invalid_id = serve_test_request(handler, "GET", "/invalid-id", "")
+  try testing::assert(invalid_id.Code == 500, "invalid SSE id was accepted")
+  let invalid_retry = serve_test_request(handler, "GET", "/invalid-retry", "")
+  try testing::assert(invalid_retry.Code == 500, "invalid SSE retry was accepted")
+  testing::pass()
+}
+
+test fn sse_head_and_delivery_replacement_are_safe() Void!Str {
+  mut app = dram::App::new()
+  app.use(
+    fn(request, response, next) {
+      next.run(request, response)
+      if request.path == "/blocked" {
+        response.status = 403
+        response.body = "forbidden".bytes()
+      }
+    },
+  )
+  app.get(
+    "/events",
+    fn(request, response) {
+      response.sse(fn(events) { panic("HEAD executed SSE callback") })
+    },
+  )
+  app.get(
+    "/buffered",
+    fn(request, response) {
+      response.sse(fn(events) { panic("replaced SSE callback executed") })
+      response.text(200, "buffered")
+    },
+  )
+  app.get(
+    "/no-content",
+    fn(request, response) {
+      response.sse(fn(events) {})
+      response.status = 204
+    },
+  )
+  app.get(
+    "/blocked",
+    fn(request, response) {
+      response.sse(fn(events) { panic("blocked SSE callback executed") })
+    },
+  )
+
+  let handler: http::Handler = app
+  let head = serve_test_request(handler, "HEAD", "/events", "")
+  try testing::assert(head.Code == 200 and head.Body.String() == "", "HEAD executed SSE delivery")
+  let buffered = serve_test_request(handler, "GET", "/buffered", "")
+  try testing::assert(buffered.Code == 200 and buffered.Body.String() == "buffered", "buffered helper did not replace SSE")
+  try testing::assert(buffered.Header().Get("Cache-Control") == "", "buffered response retained SSE cache policy")
+  try testing::assert(buffered.Header().Get("X-Content-Type-Options") == "", "buffered response retained SSE sniff policy")
+  let no_content = serve_test_request(handler, "GET", "/no-content", "")
+  try testing::assert(no_content.Code == 204, "non-200 status did not replace SSE")
+  let blocked = serve_test_request(handler, "GET", "/blocked", "")
+  try testing::assert(blocked.Code == 403 and blocked.Body.String() == "forbidden", "middleware could not replace SSE")
+  try testing::assert(blocked.Header().Get("Content-Type") == "", "direct replacement retained SSE content type")
+  testing::pass()
+}
+
+test fn corrupted_opaque_delivery_state_fails_safely() Void!Str {
+  mut app = dram::App::new()
+  app.get(
+    "/response",
+    fn(request, response) {
+      response._store = 1
+    },
+  )
+  app.get(
+    "/events-before",
+    fn(request, response) {
+      response.sse(
+        fn(events) {
+          events.store = 1
+          events.send(data: "hidden")
+        },
+      )
+    },
+  )
+  app.get(
+    "/events-after",
+    fn(request, response) {
+      response.sse(
+        fn(events) {
+          events.send(data: "visible")
+          events.store = 1
+          events.send(data: "hidden")
+        },
+      )
+    },
+  )
+
+  let handler: http::Handler = app
+  let corrupted_response = serve_test_request(handler, "GET", "/response", "")
+  try testing::assert(corrupted_response.Code == 500, "corrupted response state escaped recovery")
+
+  let before = serve_test_request(handler, "GET", "/events-before", "")
+  try testing::assert(before.Code == 500, "pre-commit event state corruption escaped recovery")
+
+  let after = httptest::NewRecorder()
+  let after_request = httptest::NewRequest("GET", "/events-after", strings::NewReader(""))
+  let outcome = unsafe { handler.ServeHTTP(after, after_request) }
+  try testing::assert(outcome.is_err(), "post-commit event state corruption did not abort")
+  try testing::assert(after.Code == 200 and after.Body.String() == "data: visible\n\n", "post-commit event corruption replaced output")
+  testing::pass()
+}

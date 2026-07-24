@@ -8,7 +8,7 @@ This checklist collects the planned and incomplete work described by the accepte
 
 ## Response architecture
 
-- [ ] When adding the first non-buffered response, model delivery as one internal state that each response helper replaces.
+- [x] When adding the first non-buffered response, model delivery as one internal state that each response helper replaces.
 
 ## Buffered response helpers
 
@@ -16,7 +16,7 @@ This checklist collects the planned and incomplete work described by the accepte
 
 ## Headers
 
-- [ ] Make header mutation commitment-aware once non-buffered delivery modes exist.
+- [ ] Make retained response/header capabilities reject mutation after SSE commitment.
 
 ## Request bodies and limits
 
@@ -50,16 +50,16 @@ This checklist collects the planned and incomplete work described by the accepte
 
 ## Server-sent events
 
-- [ ] Add a dedicated SSE delivery mode and event-stream capability.
-- [ ] Manage required SSE headers.
-- [ ] Format event names and multiline data correctly.
-- [ ] Flush events as they are sent.
-- [ ] Handle cancellation and client disconnects.
-- [ ] Support optional heartbeat comments.
-- [ ] Support event IDs.
-- [ ] Support retry values.
-- [ ] Apply the documented pre- and post-commit panic behavior.
-- [ ] Ensure panic details are never emitted as SSE data by default.
+- [x] Add a dedicated SSE delivery mode and event-stream capability.
+- [x] Manage required SSE headers.
+- [x] Format event names and multiline data correctly.
+- [x] Flush events as they are sent.
+- [x] Handle cancellation and client disconnects.
+- [x] Support application-managed heartbeat comments.
+- [x] Support event IDs.
+- [x] Support retry values.
+- [x] Apply the documented pre- and post-commit panic behavior.
+- [x] Ensure panic details are never emitted as SSE data by default.
 
 ## WebSockets
 
@@ -78,7 +78,7 @@ This checklist collects the planned and incomplete work described by the accepte
 - [ ] Keep panic details out of client responses by default.
 - [ ] Implement recovery behavior for unopened and opened file responses.
 - [ ] Implement recovery behavior before and after stream commitment.
-- [ ] Implement recovery behavior before and after SSE commitment.
+- [x] Implement recovery behavior before and after SSE commitment.
 - [ ] Implement recovery behavior before and after WebSocket upgrade.
 
 ## Server lifecycle
@@ -86,7 +86,7 @@ This checklist collects the planned and incomplete work described by the accepte
 - [ ] Add graceful shutdown.
 - [ ] Add an explicit server handle or lifecycle API.
 - [ ] Make lifecycle timeouts configurable.
-- [ ] Revisit write-timeout behavior before introducing long-lived streams and SSE.
+- [x] Revisit write-timeout behavior before introducing long-lived streams and SSE.
 
 ## Testing infrastructure
 
@@ -94,7 +94,7 @@ This checklist collects the planned and incomplete work described by the accepte
 - [ ] Simulate flushes and client disconnects.
 - [ ] Test efficient and conditional file delivery.
 - [ ] Test stream behavior before and after commitment.
-- [ ] Test SSE formatting, flushing, cancellation, and heartbeats.
+- [x] Test SSE formatting, flushing, cancellation, and heartbeat comments.
 - [ ] Test successful, rejected, and failed WebSocket upgrades.
 - [ ] Test recovery in every delivery mode and commitment state.
 
