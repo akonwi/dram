@@ -80,4 +80,6 @@ PY
 )"
 [[ "$malformed_status" == "HTTP/1.1 400 Bad Request" ]]
 
+DRAM_BASE_URL="http://127.0.0.1:8080" bun test test/sse_smoke.test.ts
+
 echo "HTTP smoke passed"

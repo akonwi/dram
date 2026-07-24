@@ -5,13 +5,14 @@ Current main requires Ard 0.30.0 or newer so middleware can be registered with t
 
 ## Current package
 
-The package root provides the first buffered HTTP slice:
+The package root provides Dram's HTTP foundation:
 
 - immutable requests carrying Go-compatible contexts and lazily decoded query parameters;
 - distinct route handlers and one-shot middleware `Next` capabilities;
 - static, `:name`, and final-segment `*name` routes, nested route groups, and customizable 404/405 responses;
 - in-memory `App.handle(Request)` dispatch;
-- buffered text and byte responses with case-insensitive, multi-value headers;
+- buffered text and byte responses plus deferred server-sent event streams;
+- case-insensitive, multi-value headers;
 - bounded request bodies with a 1 MiB default;
 - `net/http.Server` integration through `App.listen(port, host?)` or a standard `http.Handler` snapshot.
 
@@ -165,15 +166,44 @@ let id = match context::value(derived, request_id_key) {
 
 `response.json(status, value)` buffers compact JSON with `application/json; charset=utf-8`. Encoding completes before the response changes; unsupported values panic and are replaced by the recovery boundary's generic 500 response. Pre-encoded JSON should use `response.data` to avoid encoding it as a JSON string.
 
+### Server-sent events
+
+`response.sse(handler)` selects a deferred SSE delivery mode. The callback starts only after route and middleware dispatch completes, so outer middleware has a final opportunity to set headers. Dram sets status 200 and manages `Content-Type: text/event-stream`, `Cache-Control: no-cache`, and `X-Content-Type-Options: nosniff` without adding a content length.
+
+```ard
+app.get(
+  "/events",
+  fn(request, response) {
+    response.sse(
+      fn(events) {
+        while not events.cancelled() {
+          if not events.send(data: "hello", event: "message", id: "42", retry_ms: 1500) {
+            break
+          }
+        }
+      },
+    )
+  },
+)
+```
+
+`events.send` formats multiline data, optional event names, IDs, and non-negative retry milliseconds, then flushes the event. `events.comment(text)` writes and flushes an SSE comment for application-managed heartbeats. Both return `false` after cancellation or a transport failure. Event names and IDs reject CR, LF, and NUL characters.
+
+The first event or comment commits the status and headers. A panic before commitment becomes Dram's generic 500 response; a panic after commitment aborts the stream without replacing output already sent. A callback that returns without sending still completes an empty SSE response. `HEAD` sends the corresponding headers without running the callback. Selecting a buffered response helper after `sse` replaces the stream.
+
+`App.handle` performs in-memory dispatch but does not execute deferred delivery callbacks. Exercise SSE behavior through `App`'s standard `http.Handler` implementation, as Dram's tests do with `net/http/httptest`.
+
+Through Go's `http.ResponseController`, Dram clears the ordinary response write deadline before invoking an SSE callback and applies a 30-second deadline around each event write and flush. Deadline control is best-effort for custom response-writer middleware; wrappers should implement Go's `Unwrap() http.ResponseWriter` convention. Applications still own subscription state, replay, event persistence, authorization, and heartbeat policy.
+
 ## Concurrency
 
-`net/http` runs handlers concurrently. Each request carries its own immutable context and receives a mutable `Response`, but captured closure data may be shared by every request. Application code must synchronize shared maps, lists, mutable references, database clients, counters, and other dependencies. Request contexts, responses, and `Next` capabilities are synchronous and must not be retained or used by detached work after the handler returns.
+`net/http` runs handlers concurrently. Each request carries its own immutable context and receives a mutable `Response`, but captured closure data may be shared by every request. Application code must synchronize shared maps, lists, mutable references, database clients, counters, and other dependencies. Request contexts, responses, `Next`, and `EventStream` capabilities are synchronous and request-scoped; they must not be retained or used by detached work after their callback returns.
 
 Complete route and middleware registration before calling `listen` or assigning the app by value as an `http.Handler`. Both capture the configured application value for concurrent reads, and later registration changes do not affect that running server. An explicit `mut app` handler conversion shares live configuration and must not be mutated concurrently with request dispatch. `App.handle` likewise reads the application's current configuration and must not run concurrently with registration changes.
 
 ## Development
 
-Run the root checks with Ard 0.30.0 or newer:
+Run the root checks below. The HTTP smoke test also requires Bun:
 
 ```sh
 ard format dram.ard context.ard
@@ -186,6 +216,6 @@ ard build examples/hello/main.ard --out /tmp/dram-hello
 
 ## Current limits
 
-Routing supports static paths, single-segment and catch-all parameters, and static-prefix route groups. Responses and request bodies are fully buffered, oversized bodies return 413, and other body decoding failures return 400. Informational statuses and successful CONNECT responses are not supported as final buffered responses. Panic recovery uses Ard's `unsafe` boundary, returns a generic 500, and does not currently capture or log a stack. Streaming, files, SSE, WebSockets, and detached request contexts are intentionally not exposed yet.
+Routing supports static paths, single-segment and catch-all parameters, and static-prefix route groups. Ordinary responses and all request bodies are buffered; oversized bodies return 413 and other body decoding failures return 400. SSE is the only streaming delivery mode. Informational statuses and successful CONNECT responses are not supported as final buffered responses. Panic recovery uses Ard's `unsafe` boundary, returns a generic 500 before commitment, and does not currently capture or log a stack. Generic streams, files, WebSockets, automatic SSE heartbeats, and detached request contexts are not exposed yet.
 
 Architecture decisions live in [`docs/`](./docs/).

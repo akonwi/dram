@@ -1,7 +1,11 @@
 use dram
+use go:strconv
+use go:sync/atomic
+use go:time
 
 fn main() {
   mut app = dram::App::new()
+  mut active_event_streams = atomic::Int64{}
   app.set_max_body_bytes(8)
   app.use(
     fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
@@ -37,6 +41,47 @@ fn main() {
     "/json",
     fn(request, response) {
       response.json(200, ["message": "Hello from Dram"])
+    },
+  )
+
+  app.get(
+    "/events",
+    fn(request, response) {
+      response.sse(
+        fn(events) {
+          active_event_streams.Add(Int64::from(1))
+          defer active_event_streams.Add(Int64::from(-1))
+          mut message = 1
+          while not events.cancelled() {
+            let value = strconv::Itoa(message)
+            if not events.send(data: "message {value}", event: "message", id: value) {
+              break
+            }
+            message =+ 1
+            time::Sleep(1 * time::Second)
+          }
+        },
+      )
+    },
+  )
+
+  app.get(
+    "/events/active",
+    fn(request, response) {
+      response.text(200, strconv::FormatInt(active_event_streams.Load(), 10))
+    },
+  )
+
+  app.get(
+    "/events/panic",
+    fn(request, response) {
+      response.sse(
+        fn(events) {
+          events.send(data: "visible")
+          time::Sleep(50 * time::Millisecond)
+          panic("after SSE commitment")
+        },
+      )
     },
   )
 

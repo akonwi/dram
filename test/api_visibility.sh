@@ -29,6 +29,14 @@ fn continue_from_route(request: dram::Request, response: mut dram::Response) {
   request.next(response)
 }
 
+fn tamper_response(response: mut dram::Response) {
+  response._store.state.mode = 0
+}
+
+fn tamper_events(events: mut dram::EventStream) {
+  events.store.state.usable = true
+}
+
 fn main() {}
 EOF
 
@@ -37,6 +45,6 @@ if ard check "$project/main.ard" >"$project/output" 2>&1; then
   exit 1
 fi
 
-[[ "$(grep -c 'Undefined field' "$project/output")" == "2" ]]
+[[ "$(grep -c 'Undefined field' "$project/output")" == "4" ]]
 [[ "$(grep -c 'Undefined method' "$project/output")" == "1" ]]
 echo "API visibility check passed"
