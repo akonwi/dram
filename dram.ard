@@ -390,7 +390,7 @@ struct RouteSegment {
   name: Str?,
 }
 
-private struct Route {
+struct Route {
   method: Str,
   path: Str,
   segments: [RouteSegment],
