@@ -4,8 +4,8 @@ use go:sync/atomic
 use go:time
 
 fn main() {
-  mut app = dram::App::new()
-  mut active_event_streams = atomic::Int64{}
+  let app = mut dram::App::new()
+  let active_event_streams = mut atomic::Int64{}
   app.set_max_body_bytes(8)
   app.use(
     fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {

@@ -40,7 +40,7 @@ fn order_middleware(label: Str) dram::Middleware {
 
 test fn exact_route_uses_captured_dependency_and_middleware() Void!Str {
   let greeting = "Hello"
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   app.use(
     fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
       response.header("X-Middleware", "before")
@@ -74,7 +74,7 @@ test fn exact_route_uses_captured_dependency_and_middleware() Void!Str {
 }
 
 test fn middleware_runs_for_not_found_and_method_not_allowed() Void!Str {
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   app.use(
     fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
       response.header("X-Middleware", "yes")
@@ -100,7 +100,7 @@ test fn middleware_runs_for_not_found_and_method_not_allowed() Void!Str {
 }
 
 test fn custom_not_found_and_method_not_allowed_handlers_run_with_global_middleware() Void!Str {
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   app.use(
     fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
       response.header("X-Global", "yes")
@@ -118,7 +118,7 @@ test fn custom_not_found_and_method_not_allowed_handlers_run_with_global_middlew
     },
   )
 
-  mut api = app.group("/api")
+  let api = mut app.group("/api")
   api.use(
     fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
       response.header("X-Group", "yes")
@@ -179,7 +179,7 @@ test fn custom_not_found_and_method_not_allowed_handlers_run_with_global_middlew
 }
 
 test fn path_params_are_available_to_middleware_and_handlers() Void!Str {
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   app.use(
     fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
       response.header("X-User-Id", request.param("id").or(""))
@@ -217,7 +217,7 @@ test fn path_params_are_available_to_middleware_and_handlers() Void!Str {
 }
 
 test fn catch_all_params_capture_the_remaining_path() Void!Str {
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   app.use(
     fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
       response.header("X-Catch-All", request.param("path").or("missing"))
@@ -258,14 +258,14 @@ test fn catch_all_params_capture_the_remaining_path() Void!Str {
 }
 
 test fn catch_all_routes_validate_and_reject_overlaps() Void!Str {
-  mut static_first = dram::App::new()
+  let static_first = mut dram::App::new()
   static_first.get("/files/static", fn(request, response) {})
   let static_overlap = unsafe {
     static_first.get("/files/*path", fn(request, response) {})
   }
   try testing::assert(static_overlap.is_err(), "catch-all overlapped a static route")
 
-  mut catch_all_first = dram::App::new()
+  let catch_all_first = mut dram::App::new()
   catch_all_first.get("/files/*path", fn(request, response) {})
   let parameter_overlap = unsafe {
     catch_all_first.get("/files/:name", fn(request, response) {})
@@ -289,7 +289,7 @@ test fn catch_all_routes_validate_and_reject_overlaps() Void!Str {
   }
   try testing::assert(duplicate_name.is_err(), "duplicate catch-all name was accepted")
 
-  mut compatible = dram::App::new()
+  let compatible = mut dram::App::new()
   compatible.get(
     "/files",
     fn(request, response) {
@@ -326,7 +326,7 @@ test fn query_accessors_lazily_decode_raw_queries() Void!Str {
   let derived = query_request.with_context(request_context::background())
   try testing::assert(derived.query("q").or("") == "hello world", "derived request lost its raw query")
 
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   app.get(
     "/search",
     fn(request, response) {
@@ -354,7 +354,7 @@ test fn query_accessors_lazily_decode_raw_queries() Void!Str {
 }
 
 test fn static_routes_outrank_params_and_equivalent_patterns_conflict() Void!Str {
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   app.get(
     "/users/:id",
     fn(request, response) {
@@ -402,10 +402,10 @@ test fn static_routes_outrank_params_and_equivalent_patterns_conflict() Void!Str
 }
 
 test fn groups_compose_static_prefixes_and_snapshot_middleware() Void!Str {
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   app.use(order_middleware("global,"))
 
-  mut api = app.group("/api")
+  let api = mut app.group("/api")
   api.get(
     "/before",
     fn(request, response) {
@@ -420,7 +420,7 @@ test fn groups_compose_static_prefixes_and_snapshot_middleware() Void!Str {
     },
   )
 
-  mut admin = api.group("/admin")
+  let admin = mut api.group("/admin")
   admin.use(order_middleware("child,"))
   admin.get(
     "/users/:id",
@@ -483,14 +483,14 @@ test fn groups_compose_static_prefixes_and_snapshot_middleware() Void!Str {
 }
 
 test fn copied_groups_isolate_middleware_snapshots() Void!Str {
-  mut app = dram::App::new()
-  mut base = app.group("/copy")
+  let app = mut dram::App::new()
+  let base = mut app.group("/copy")
   base.use(order_middleware("one,"))
   base.use(order_middleware("two,"))
   base.use(order_middleware("three,"))
 
-  mut left = base
-  mut right = base
+  let left = mut deref base
+  let right = mut deref base
   left.use(order_middleware("left,"))
   right.use(order_middleware("right,"))
   left.get(
@@ -520,8 +520,8 @@ test fn copied_groups_isolate_middleware_snapshots() Void!Str {
 }
 
 test fn groups_validate_prefixes_paths_and_combined_conflicts() Void!Str {
-  mut app = dram::App::new()
-  mut api = app.group("/api")
+  let app = mut dram::App::new()
+  let api = mut app.group("/api")
   api.get("/users", fn(request, response) {})
 
   let parameter_prefix = unsafe {
@@ -552,7 +552,7 @@ test fn groups_validate_prefixes_paths_and_combined_conflicts() Void!Str {
 }
 
 test fn middleware_short_circuits_by_omitting_next() Void!Str {
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   app.use(
     fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
       response.text(401, "Unauthorized")
@@ -574,7 +574,7 @@ test fn middleware_short_circuits_by_omitting_next() Void!Str {
 test fn context_values_propagate_without_key_collisions() Void!Str {
   let first_key = ValueKey{id: 1}
   let second_key = ValueKey{id: 2}
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   app.use(
     fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
       let derived = request_context::with_value(request.context(), first_key, "first")
@@ -599,7 +599,7 @@ test fn context_values_propagate_without_key_collisions() Void!Str {
 }
 
 test fn in_memory_request_constructor_uses_background() Void!Str {
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   app.get(
     "/context",
     fn(request: dram::Request, response: mut dram::Response) {
@@ -620,7 +620,7 @@ test fn in_memory_request_constructor_uses_background() Void!Str {
 }
 
 test fn json_helper_buffers_encoded_values_and_recovers_encoding_failures() Void!Str {
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   app.get(
     "/json",
     fn(request, response) {
@@ -663,7 +663,7 @@ test fn json_helper_buffers_encoded_values_and_recovers_encoding_failures() Void
 }
 
 test fn post_can_read_headers_and_return_buffered_bytes() Void!Str {
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   app.post(
     "/echo",
     fn(request: dram::Request, response: mut dram::Response) {
@@ -671,13 +671,13 @@ test fn post_can_read_headers_and_return_buffered_bytes() Void!Str {
       response.bytes(201, request.body)
     },
   )
-  mut headers = dram::Headers::new()
+  let headers = mut dram::Headers::new()
   headers.set("x-test", "present")
-  mut request = dram::Request::new("POST", "/echo")
-  request.headers = headers
+  let request = mut dram::Request::new("POST", "/echo")
+  request.headers = deref headers
   request.body = "bytes".bytes()
 
-  let response = app.handle(request)
+  let response = app.handle(deref request)
   try testing::assert(response.status == 201, "POST route did not return 201")
   try testing::assert(Str::from(response.body) == "bytes", "byte response changed")
   try testing::assert(response.headers.get("X-Seen").or("") == "present", "request header missing")
@@ -689,12 +689,12 @@ test fn post_can_read_headers_and_return_buffered_bytes() Void!Str {
 }
 
 test fn headers_preserve_repeated_values_and_own_framing() Void!Str {
-  mut headers = dram::Headers::new()
+  let headers = mut dram::Headers::new()
   headers.add("set-cookie", "a=1")
   headers.add("Set-Cookie", "b=2")
   try testing::assert(headers.values("SET-COOKIE").size() == 2, "repeated values collapsed")
 
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   app.get(
     "/framing",
     fn(request: dram::Request, response: mut dram::Response) {
@@ -713,7 +713,7 @@ test fn headers_preserve_repeated_values_and_own_framing() Void!Str {
 }
 
 test fn header_values_reject_controls_but_allow_htab() Void!Str {
-  mut headers = dram::Headers::new()
+  let headers = mut dram::Headers::new()
   headers.set("X-Tab", "left\tright")
   try testing::assert(headers.get("x-tab").or("") == "left\tright", "HTAB was rejected")
   let invalid = unsafe {
@@ -724,7 +724,7 @@ test fn header_values_reject_controls_but_allow_htab() Void!Str {
 }
 
 test fn body_limit_returns_413_before_dispatch() Void!Str {
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   app.set_max_body_bytes(4)
   app.post(
     "/upload",
@@ -732,16 +732,16 @@ test fn body_limit_returns_413_before_dispatch() Void!Str {
       response.text(200, "should not run")
     },
   )
-  mut request = dram::Request::new("POST", "/upload")
+  let request = mut dram::Request::new("POST", "/upload")
   request.body = "large".bytes()
 
-  let response = app.handle(request)
+  let response = app.handle(deref request)
   try testing::assert(response.status == 413, "oversized request did not return 413")
   testing::pass()
 }
 
 test fn head_falls_back_to_get_and_prefers_explicit_head() Void!Str {
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   app.get(
     "/resource",
     fn(request: dram::Request, response: mut dram::Response) {
@@ -767,7 +767,7 @@ test fn head_falls_back_to_get_and_prefers_explicit_head() Void!Str {
 }
 
 test fn finalization_rejects_unsupported_statuses_and_connect() Void!Str {
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   app.get(
     "/reset",
     fn(request: dram::Request, response: mut dram::Response) {
@@ -797,7 +797,7 @@ test fn finalization_rejects_unsupported_statuses_and_connect() Void!Str {
 }
 
 test fn custom_methods_and_duplicate_validation() Void!Str {
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   app.route(
     "M-SEARCH",
     "/discover",
@@ -821,7 +821,7 @@ test fn custom_methods_and_duplicate_validation() Void!Str {
 }
 
 test fn next_is_one_shot() Void!Str {
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   app.use(
     fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
       next.run(request, response)
@@ -841,7 +841,7 @@ test fn next_is_one_shot() Void!Str {
 }
 
 test fn app_converts_to_an_isolated_standard_handler_snapshot() Void!Str {
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   app.set_max_body_bytes(8)
   app.use(
     fn(request, response, next) {
@@ -867,8 +867,8 @@ test fn app_converts_to_an_isolated_standard_handler_snapshot() Void!Str {
     },
   )
 
-  let handler: http::Handler = app
-  let server = http::Server{Addr: "127.0.0.1:0", Handler: app}
+  let handler: http::Handler = deref app
+  let server = http::Server{Addr: "127.0.0.1:0", Handler: deref app}
 
   app.set_max_body_bytes(1)
   app.use(
@@ -905,7 +905,7 @@ test fn app_converts_to_an_isolated_standard_handler_snapshot() Void!Str {
 }
 
 test fn mutable_http_handler_reference_observes_later_registration() Void!Str {
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   let handler: http::Handler = mut app
   app.get(
     "/later",
@@ -928,7 +928,7 @@ test fn listen_rejects_invalid_ports_before_binding() Void!Str {
 }
 
 test fn panic_replaces_partial_response() Void!Str {
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   app.get(
     "/panic",
     fn(request: dram::Request, response: mut dram::Response) {
@@ -946,7 +946,7 @@ test fn panic_replaces_partial_response() Void!Str {
 }
 
 test fn sse_formats_events_flushes_and_waits_for_middleware() Void!Str {
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   app.use(
     fn(request, response, next) {
       next.run(request, response)
@@ -989,7 +989,7 @@ test fn sse_formats_events_flushes_and_waits_for_middleware() Void!Str {
 }
 
 test fn sse_recovery_respects_commitment() Void!Str {
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   app.get(
     "/before",
     fn(request, response) {
@@ -1023,7 +1023,7 @@ test fn sse_recovery_respects_commitment() Void!Str {
 }
 
 test fn sse_validates_fields_before_commitment() Void!Str {
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   app.get(
     "/invalid-id",
     fn(request, response) {
@@ -1046,7 +1046,7 @@ test fn sse_validates_fields_before_commitment() Void!Str {
 }
 
 test fn sse_head_and_delivery_replacement_are_safe() Void!Str {
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   app.use(
     fn(request, response, next) {
       next.run(request, response)
@@ -1099,7 +1099,7 @@ test fn sse_head_and_delivery_replacement_are_safe() Void!Str {
 }
 
 test fn corrupted_opaque_delivery_state_fails_safely() Void!Str {
-  mut app = dram::App::new()
+  let app = mut dram::App::new()
   app.get(
     "/response",
     fn(request, response) {
