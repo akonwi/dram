@@ -33,7 +33,7 @@ fn serve_test_request(handler: http::Handler, method: Str, target: Str, body: St
 fn order_middleware(label: Str) dram::Middleware {
   fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
     let current = response.headers.get("X-Order").or("")
-    response.header("X-Order", "{current}{label}")
+    response.headers.set("X-Order", "{current}{label}")
     next.run(request, response)
   }
 }
@@ -42,9 +42,9 @@ test fn exact_route_uses_captured_dependency_and_middleware() Void!Str {
   let greeting = "Hello"
   let app = mut dram::App::new()
   app.use(fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
-    response.header("X-Middleware", "before")
+    response.headers.set("X-Middleware", "before")
     next.run(request, response)
-    response.header("X-After", "yes")
+    response.headers.set("X-After", "yes")
     response.body = "{Str::from(response.body)} outer".bytes()
   })
   app.use(fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
@@ -69,7 +69,7 @@ test fn exact_route_uses_captured_dependency_and_middleware() Void!Str {
 test fn middleware_runs_for_not_found_and_method_not_allowed() Void!Str {
   let app = mut dram::App::new()
   app.use(fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
-    response.header("X-Middleware", "yes")
+    response.headers.set("X-Middleware", "yes")
     next.run(request, response)
   })
   app.get("/known", fn(request: dram::Request, response: mut dram::Response) {
@@ -90,7 +90,7 @@ test fn middleware_runs_for_not_found_and_method_not_allowed() Void!Str {
 test fn custom_not_found_and_method_not_allowed_handlers_run_with_global_middleware() Void!Str {
   let app = mut dram::App::new()
   app.use(fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
-    response.header("X-Global", "yes")
+    response.headers.set("X-Global", "yes")
     next.run(request, response)
   })
   app.not_found(fn(request, response) {
@@ -102,7 +102,7 @@ test fn custom_not_found_and_method_not_allowed_handlers_run_with_global_middlew
 
   let api = mut app.group("/api")
   api.use(fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
-    response.header("X-Group", "yes")
+    response.headers.set("X-Group", "yes")
     next.run(request, response)
   })
   api.get("/users/:id", fn(request, response) {
@@ -158,7 +158,7 @@ test fn custom_not_found_and_method_not_allowed_handlers_run_with_global_middlew
 test fn path_params_are_available_to_middleware_and_handlers() Void!Str {
   let app = mut dram::App::new()
   app.use(fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
-    response.header("X-User-Id", request.param("id").or(""))
+    response.headers.set("X-User-Id", request.param("id").or(""))
     next.run(request, response)
   })
   app.get("/users/:id", fn(request, response) {
@@ -191,7 +191,7 @@ test fn path_params_are_available_to_middleware_and_handlers() Void!Str {
 test fn catch_all_params_capture_the_remaining_path() Void!Str {
   let app = mut dram::App::new()
   app.use(fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
-    response.header("X-Catch-All", request.param("path").or("missing"))
+    response.headers.set("X-Catch-All", request.param("path").or("missing"))
     next.run(request, response)
   })
   app.get("/files/*path", fn(request, response) {
@@ -519,9 +519,9 @@ test fn in_memory_request_constructor_uses_background() Void!Str {
     let ctx = request.context
     let done: Receiver<Void> = request_context::done(ctx)
     let context_error = request_context::err(ctx)
-    response.header("X-Cancelled", context_error.is_some().to_str())
-    response.header("X-Error", context_error.or("none"))
-    response.header("X-Deadline", request_context::deadline(ctx).is_some().to_str())
+    response.headers.set("X-Cancelled", context_error.is_some().to_str())
+    response.headers.set("X-Error", context_error.or("none"))
+    response.headers.set("X-Deadline", request_context::deadline(ctx).is_some().to_str())
     response.text(200, "context")
   })
   let response = app.handle(dram::Request::new("GET", "/context"))
@@ -571,7 +571,7 @@ test fn json_helper_buffers_encoded_values_and_recovers_encoding_failures() Void
 test fn post_can_read_headers_and_return_buffered_bytes() Void!Str {
   let app = mut dram::App::new()
   app.post("/echo", fn(request: dram::Request, response: mut dram::Response) {
-    response.header("X-Seen", request.header("X-Test").or("missing"))
+    response.headers.set("X-Seen", request.headers.get("X-Test").or("missing"))
     response.bytes(201, request.body)
   })
   let headers = mut dram::Headers::new()
@@ -599,9 +599,9 @@ test fn headers_preserve_repeated_values_and_own_framing() Void!Str {
 
   let app = mut dram::App::new()
   app.get("/framing", fn(request: dram::Request, response: mut dram::Response) {
-    response.header("Content-Length", "1")
-    response.header("Transfer-Encoding", "chunked")
-    response.header("Trailer", "X-Later")
+    response.headers.set("Content-Length", "1")
+    response.headers.set("Transfer-Encoding", "chunked")
+    response.headers.set("Trailer", "X-Later")
     response.status = 200
     response.body = "hello".bytes()
   })
@@ -609,6 +609,26 @@ test fn headers_preserve_repeated_values_and_own_framing() Void!Str {
   try testing::assert(response.headers.get("Content-Length").or("") == "5", "content length not replaced")
   try testing::assert(response.headers.get("Transfer-Encoding").is_none(), "transfer encoding retained")
   try testing::assert(response.headers.get("Trailer").is_none(), "trailer retained")
+  testing::pass()
+}
+
+test fn cloned_headers_are_independent() Void!Str {
+  let original = mut dram::Headers::new()
+  original.set("X-Mode", "original")
+  original.add("Set-Cookie", "a=1")
+  original.add("Set-Cookie", "b=2")
+
+  let cloned = mut original.clone()
+  cloned.set("X-Mode", "clone")
+  cloned.delete("Set-Cookie")
+
+  let returned_values = mut original.values("Set-Cookie")
+  returned_values.push("c=3")
+
+  try testing::assert(original.get("X-Mode").or("") == "original", "clone mutated original value")
+  try testing::assert(original.values("Set-Cookie").size() == 2, "returned values exposed stored slice")
+  try testing::assert(cloned.get("X-Mode").or("") == "clone", "clone did not replace its value")
+  try testing::assert(cloned.values("Set-Cookie").size() == 0, "delete retained cloned values")
   testing::pass()
 }
 
@@ -640,7 +660,7 @@ test fn body_limit_returns_413_before_dispatch() Void!Str {
 test fn head_falls_back_to_get_and_prefers_explicit_head() Void!Str {
   let app = mut dram::App::new()
   app.get("/resource", fn(request: dram::Request, response: mut dram::Response) {
-    response.header("X-Handler", "GET")
+    response.headers.set("X-Handler", "GET")
     response.text(200, "get body")
   })
   let fallback = app.handle(dram::Request::new("HEAD", "/resource"))
@@ -648,7 +668,7 @@ test fn head_falls_back_to_get_and_prefers_explicit_head() Void!Str {
   try testing::assert(fallback.headers.get("Content-Length").or("") == "8", "HEAD length changed")
 
   app.head("/resource", fn(request: dram::Request, response: mut dram::Response) {
-    response.header("X-Handler", "HEAD")
+    response.headers.set("X-Handler", "HEAD")
     response.text(202, "head body")
   })
   let explicit = app.handle(dram::Request::new("HEAD", "/resource"))
@@ -716,7 +736,7 @@ test fn app_converts_to_an_isolated_standard_handler_snapshot() Void!Str {
   let app = mut dram::App::new()
   app.set_max_body_bytes(8)
   app.use(fn(request, response, next) {
-    response.header("X-Snapshot", "before")
+    response.headers.set("X-Snapshot", "before")
     next.run(request, response)
   })
   app.not_found(fn(request, response) {
@@ -734,7 +754,7 @@ test fn app_converts_to_an_isolated_standard_handler_snapshot() Void!Str {
 
   app.set_max_body_bytes(1)
   app.use(fn(request, response, next) {
-    response.header("X-Snapshot", "after")
+    response.headers.set("X-Snapshot", "after")
     next.run(request, response)
   })
   app.not_found(fn(request, response) {
@@ -783,7 +803,7 @@ test fn panic_replaces_partial_response() Void!Str {
   let app = mut dram::App::new()
   app.get("/panic", fn(request: dram::Request, response: mut dram::Response) {
     response.status = 204
-    response.header("X-Partial", "secret")
+    response.headers.set("X-Partial", "secret")
     response.body = "sensitive".bytes()
     panic("boom")
   })
@@ -798,7 +818,7 @@ test fn sse_formats_events_flushes_and_waits_for_middleware() Void!Str {
   let app = mut dram::App::new()
   app.use(fn(request, response, next) {
     next.run(request, response)
-    response.header("X-After", "middleware")
+    response.headers.set("X-After", "middleware")
   })
   app.get("/events", fn(request, response) {
     response.sse(fn(events) {

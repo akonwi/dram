@@ -27,7 +27,7 @@ fn main() {
   let greeter = Greeter{greeting: "Hello"}
   mut app = dram::App::new()
   app.use(fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
-    response.header("X-Powered-By", "Dram")
+    response.headers.set("X-Powered-By", "Dram")
     next.run(request, response)
   })
   app.get("/", fn(request: dram::Request, response: mut dram::Response) {
@@ -135,7 +135,7 @@ Callers that need custom headers, bodies, or initial contexts may instantiate `R
 
 Like Go's `net/http`, each `Request` owns a Go `context.Context` interface value:
 
-- `request.context() context::Context`
+- `request.context context::Context`
 - `request.with_context(context) Request`
 - `context::done(context) Receiver<Void>`
 - `context::err(context) Str?`
@@ -156,7 +156,7 @@ private struct RequestIdKey {
 }
 
 let request_id_key = RequestIdKey{marker: 0}
-let derived = context::with_value(request.context(), request_id_key, "req-123")
+let derived = context::with_value(request.context, request_id_key, "req-123")
 let id = match context::value(derived, request_id_key) {
   boxed => unsafe::cast<Str>(boxed),
   _ => Maybe::new(),
@@ -165,9 +165,23 @@ let id = match context::value(derived, request_id_key) {
 
 ## Responses and headers
 
-`response.header(name, value)` replaces a header, while `response.add_header(name, value)` preserves repeated values such as `Set-Cookie`. `response.bytes` uses `application/octet-stream`; use `response.data(status, content_type, bytes)` for an explicit media type.
+`Headers` wraps Go's `http.Header` with Ard-style method names and preserves its case-insensitive, multi-value behavior:
 
-`response.json(status, value)` buffers compact JSON with `application/json; charset=utf-8`. Encoding completes before the response changes; unsupported values panic and are replaced by the recovery boundary's generic 500 response. Pre-encoded JSON should use `response.data` to avoid encoding it as a JSON string.
+```ard
+let content_type = request.headers.get("Content-Type")
+let cookies = request.headers.values("Cookie")
+
+response.headers.set("Content-Type", "application/json")
+response.headers.add("Set-Cookie", first_cookie)
+response.headers.add("Set-Cookie", second_cookie)
+response.headers.delete("X-Debug")
+
+let independent = response.headers.clone()
+```
+
+`get` returns the first value as `Str?`, `values` returns an independent list of every value, and `clone` creates an independent header map. Header names are case-insensitive and their iteration order is unspecified.
+
+`response.bytes` uses `application/octet-stream`; use `response.data(status, content_type, bytes)` for an explicit media type. `response.json(status, value)` buffers compact JSON with `application/json; charset=utf-8`. Encoding completes before the response changes; unsupported values panic and are replaced by the recovery boundary's generic 500 response. Pre-encoded JSON should use `response.data` to avoid encoding it as a JSON string.
 
 ### Server-sent events
 

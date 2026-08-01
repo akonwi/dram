@@ -6,7 +6,6 @@ use go:encoding/json
 use go:io
 use go:net
 use go:net/http
-use go:net/textproto
 use go:net/url
 use go:strconv
 use go:strings
@@ -16,32 +15,29 @@ let DEFAULT_MAX_BODY_BYTES = 1_048_576
 let DEFAULT_MAX_HEADER_BYTES = DEFAULT_MAX_BODY_BYTES
 
 struct Headers {
-  entries: mut [Str: [Str]],
+  _raw: http::Header,
 }
 
 fn Headers::new() Headers {
-  Headers{entries: mut [:]}
+  Headers{_raw: [:]}
 }
 
 impl Headers {
   fn get(name: Str) Str? {
-    self.values(name).at(0)
+    self._raw.Values(name).at(0)
   }
 
   fn values(name: Str) [Str] {
-    let key = textproto::CanonicalMIMEHeaderKey(name)
-    let stored: [Str] = self.entries.get(key).or([])
     let copied: mut [Str] = mut []
-    for value in stored {
+    for value in self._raw.Values(name) {
       copied.push(value)
     }
     deref copied
   }
 
   fn names() [Str] {
-    let stored = self.entries.keys()
     let copied: mut [Str] = mut []
-    for name in stored {
+    for name in self._raw.keys() {
       copied.push(name)
     }
     deref copied
@@ -49,19 +45,20 @@ impl Headers {
 
   fn mut set(name: Str, value: Str) {
     validate_header(name, value)
-    self.entries.set(textproto::CanonicalMIMEHeaderKey(name), [value])
+    self._raw.Set(name, value)
   }
 
   fn mut add(name: Str, value: Str) {
     validate_header(name, value)
-    let key = textproto::CanonicalMIMEHeaderKey(name)
-    let values: mut [Str] = mut self.entries.get(key).or([])
-    values.push(value)
-    self.entries.set(key, deref values)
+    self._raw.Add(name, value)
   }
 
-  fn mut remove(name: Str) {
-    self.entries.delete(textproto::CanonicalMIMEHeaderKey(name))
+  fn mut delete(name: Str) {
+    self._raw.Del(name)
+  }
+
+  fn clone() Headers {
+    Headers{_raw: self._raw.Clone()}
   }
 }
 
@@ -89,10 +86,6 @@ fn Request::new(method: Str, path: Str) Request {
 }
 
 impl Request {
-  fn header(name: Str) Str? {
-    self.headers.get(name)
-  }
-
   fn param(name: Str) Str? {
     self.path_params.get(name)
   }
@@ -153,14 +146,6 @@ fn Response::new() Response {
 }
 
 impl Response {
-  fn mut header(name: Str, value: Str) {
-    self.headers.set(name, value)
-  }
-
-  fn mut add_header(name: Str, value: Str) {
-    self.headers.add(name, value)
-  }
-
   fn mut text(status: Int, body: Str) {
     select_buffered(self)
     self.status = status
@@ -205,9 +190,9 @@ private fn response_store(response: Response) ResponseStore {
 private fn select_buffered(response: mut Response) {
   let store = response_store(deref response)
   if store.state.mode == ResponseMode::SSE {
-    response.headers.remove("Content-Type")
-    response.headers.remove("Cache-Control")
-    response.headers.remove("X-Content-Type-Options")
+    response.headers.delete("Content-Type")
+    response.headers.delete("Cache-Control")
+    response.headers.delete("X-Content-Type-Options")
   }
   store.state.mode = ResponseMode::Buffered
   store.state.sse_handler = Maybe::new()
@@ -1087,9 +1072,9 @@ private fn finalize_response(method: Str, response: Response) Response {
       finalize_response(method, internal_server_error())
     } else {
       let finalized = mut response
-      finalized.headers.remove("Transfer-Encoding")
-      finalized.headers.remove("Trailer")
-      finalized.headers.remove("Content-Length")
+      finalized.headers.delete("Transfer-Encoding")
+      finalized.headers.delete("Trailer")
+      finalized.headers.delete("Content-Length")
       if mode == ResponseMode::Buffered and body_allowed {
         finalized.headers.set("Content-Length", response.body.size().to_str())
       }
@@ -1255,13 +1240,7 @@ private fn deliver_sse_response(
 }
 
 private fn copy_headers(headers: Headers) Headers {
-  let copied = mut Headers::new()
-  for name in headers.names() {
-    for value in headers.values(name) {
-      copied.add(name, value)
-    }
-  }
-  deref copied
+  headers.clone()
 }
 
 private fn copy_http_headers(writer: http::ResponseWriter, headers: Headers) {

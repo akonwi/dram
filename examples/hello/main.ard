@@ -8,12 +8,12 @@ fn main() {
   let active_event_streams = mut atomic::Int64{}
   app.set_max_body_bytes(8)
   app.use(fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
-    response.header("X-Powered-By", "Dram")
+    response.headers.set("X-Powered-By", "Dram")
     next.run(request, response)
   })
   app.get("/", fn(request, response) {
-    response.add_header("Set-Cookie", "first=1; HttpOnly; SameSite=Lax")
-    response.add_header("Set-Cookie", "second=2; HttpOnly; SameSite=Lax")
+    response.headers.add("Set-Cookie", "first=1; HttpOnly; SameSite=Lax")
+    response.headers.add("Set-Cookie", "second=2; HttpOnly; SameSite=Lax")
     response.text(200, "Hello from Dram")
   })
 
