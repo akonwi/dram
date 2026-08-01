@@ -12,8 +12,8 @@ use go:strconv
 use go:strings
 use go:time
 
-let DEFAULT_MAX_BODY_BYTES = 1048576
-let DEFAULT_MAX_HEADER_BYTES = 1048576
+let DEFAULT_MAX_BODY_BYTES = 1_048_576
+let DEFAULT_MAX_HEADER_BYTES = DEFAULT_MAX_BODY_BYTES
 
 struct Headers {
   entries: mut [Str: [Str]],
