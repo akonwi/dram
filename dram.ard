@@ -93,10 +93,6 @@ impl Request {
     self.headers.get(name)
   }
 
-  fn context() go_context::Context {
-    self.context
-  }
-
   fn param(name: Str) Str? {
     self.path_params.get(name)
   }
@@ -374,7 +370,9 @@ struct Next {
 
 impl Next {
   fn run(request: Request, response: mut Response) {
-    let store = unsafe::cast<NextStore>(self.store).expect("invalid internal middleware continuation")
+    let store = unsafe::cast<NextStore>(
+      self.store,
+    ).expect("invalid internal middleware continuation")
     if not store.state.ran {
       store.state.ran = true
       store.state.callback(request, response)
@@ -689,9 +687,7 @@ private fn parse_query_values(raw_query: Str, name: Str) [Str] {
 }
 
 private fn make_next(callback: fn(Request, mut Response)) Next {
-  let store = NextStore{
-    state: mut NextState{callback: callback, ran: false}
-  }
+  let store = NextStore{state: mut NextState{callback: callback, ran: false}}
   Next{store: store}
 }
 
@@ -748,12 +744,14 @@ private fn serve_http(
           )
         }
       },
-      err(_) => deliver_http_response(
-        writer,
-        raw_request.Method,
-        raw_request.Context(),
-        finalize_response(raw_request.Method, bad_request()),
-      ),
+      err(_) => {
+        deliver_http_response(
+          writer,
+          raw_request.Method,
+          raw_request.Context(),
+          finalize_response(raw_request.Method, bad_request()),
+        )
+      },
     }
   }
 }
@@ -776,7 +774,9 @@ private fn handle_bounded(
 }
 
 private fn finalize_safely(method: Str, response: Response) Response {
-  match unsafe { finalize_response(method, response) } {
+  match unsafe {
+    finalize_response(method, response)
+  } {
     ok(finalized) => finalized,
     err(_) => finalize_response(method, internal_server_error()),
   }
@@ -869,11 +869,9 @@ private fn dispatch(
   response_store(deref response).state.context = Maybe::new(request.context)
   if index < middleware_handlers.size() {
     let middleware = middleware_handlers.at(index).expect("middleware index is in bounds")
-    let next = make_next(
-      fn(next_request: Request, next_response: mut Response) {
-        dispatch(middleware_handlers, index + 1, handler, next_request, next_response)
-      },
-    )
+    let next = make_next(fn(next_request: Request, next_response: mut Response) {
+      dispatch(middleware_handlers, index + 1, handler, next_request, next_response)
+    })
     middleware(request, response, next)
   } else {
     match handler {
@@ -1244,9 +1242,7 @@ private fn deliver_sse_response(
     handler(stream)
     commit_event_stream(stream)
   } {
-    ok(_) => {
-      store.state.usable = false
-    },
+    ok(_) => { store.state.usable = false },
     err(_) => {
       store.state.usable = false
       if store.state.committed {
