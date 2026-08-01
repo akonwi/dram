@@ -124,10 +124,6 @@ private struct ResponseState {
   context: go_context::Context?,
 }
 
-private struct ResponseStore {
-  state: mut ResponseState,
-}
-
 struct Response {
   status: Int,
   headers: Headers,
@@ -136,12 +132,12 @@ struct Response {
 }
 
 fn Response::new() Response {
-  let store = ResponseStore{state: mut ResponseState{mode: ResponseMode::Buffered}}
+  let state = mut ResponseState{mode: ResponseMode::Buffered}
   Response{
     status: 404,
     headers: Headers::new(),
     body: [],
-    _store: store,
+    _store: state,
   }
 }
 
@@ -172,9 +168,9 @@ impl Response {
   }
 
   fn mut sse(handler: SSEHandler) {
-    let store = response_store(deref self)
-    store.state.mode = ResponseMode::SSE
-    store.state.sse_handler = Maybe::new(handler)
+    let state = response_state(deref self)
+    state.mode = ResponseMode::SSE
+    state.sse_handler = Maybe::new(handler)
     self.status = 200
     self.headers.set("Content-Type", "text/event-stream")
     self.headers.set("Cache-Control", "no-cache")
@@ -183,19 +179,19 @@ impl Response {
   }
 }
 
-private fn response_store(response: Response) ResponseStore {
-  unsafe::cast<ResponseStore>(response._store).expect("invalid internal response state")
+private fn response_state(response: Response) mut ResponseState {
+  unsafe::cast<mut ResponseState>(response._store).expect("invalid internal response state")
 }
 
 private fn select_buffered(response: mut Response) {
-  let store = response_store(deref response)
-  if store.state.mode == ResponseMode::SSE {
+  let state = response_state(deref response)
+  if state.mode == ResponseMode::SSE {
     response.headers.delete("Content-Type")
     response.headers.delete("Cache-Control")
     response.headers.delete("X-Content-Type-Options")
   }
-  store.state.mode = ResponseMode::Buffered
-  store.state.sse_handler = Maybe::new()
+  state.mode = ResponseMode::Buffered
+  state.sse_handler = Maybe::new()
 }
 
 private struct EventStreamState {
@@ -206,10 +202,6 @@ private struct EventStreamState {
   headers: Headers,
   committed: Bool,
   usable: Bool,
-}
-
-private struct EventStreamStore {
-  state: mut EventStreamState,
 }
 
 struct EventStream {
@@ -263,26 +255,26 @@ impl EventStream {
   }
 
   fn cancelled() Bool {
-    let store = event_stream_store(mut self)
-    (not store.state.usable) or request_context::err(store.state.context).is_some() or request_context::err(store.state.transport_context).is_some()
+    let state = event_stream_state(mut self)
+    (not state.usable) or request_context::err(state.context).is_some() or request_context::err(state.transport_context).is_some()
   }
 
   private fn mut write_and_flush(body: Str) Bool {
-    let store = event_stream_store(self)
-    if (not store.state.usable) or request_context::err(store.state.context).is_some() or request_context::err(store.state.transport_context).is_some() {
-      store.state.usable = false
+    let state = event_stream_state(self)
+    if (not state.usable) or request_context::err(state.context).is_some() or request_context::err(state.transport_context).is_some() {
+      state.usable = false
       false
     } else if not commit_event_stream(self) {
       false
     } else {
-      let controller = http::NewResponseController(store.state.writer)
+      let controller = http::NewResponseController(state.writer)
       match controller.SetWriteDeadline(time::Now().Add(30 * time::Second)) {
         ok => (),
         err(_) => (),
       }
-      let written = match store.state.writer.Write(mut body.bytes()) {
+      let written = match state.writer.Write(mut body.bytes()) {
         err(_) => {
-          store.state.usable = false
+          state.usable = false
           -1
         },
         ok(count) => count,
@@ -301,28 +293,28 @@ impl EventStream {
         err(_) => (),
       }
       if not flushed {
-        store.state.usable = false
+        state.usable = false
       }
       flushed
     }
   }
 }
 
-private fn event_stream_store(stream: mut EventStream) EventStreamStore {
-  unsafe::cast<EventStreamStore>(stream.store).expect("invalid internal event stream state")
+private fn event_stream_state(stream: mut EventStream) mut EventStreamState {
+  unsafe::cast<mut EventStreamState>(stream.store).expect("invalid internal event stream state")
 }
 
 private fn commit_event_stream(stream: mut EventStream) Bool {
-  let store = event_stream_store(stream)
-  if store.state.committed {
+  let state = event_stream_state(stream)
+  if state.committed {
     true
-  } else if (not store.state.usable) or request_context::err(store.state.context).is_some() or request_context::err(store.state.transport_context).is_some() {
-    store.state.usable = false
+  } else if (not state.usable) or request_context::err(state.context).is_some() or request_context::err(state.transport_context).is_some() {
+    state.usable = false
     false
   } else {
-    copy_http_headers(store.state.writer, store.state.headers)
-    store.state.committed = true
-    store.state.writer.WriteHeader(store.state.status)
+    copy_http_headers(state.writer, state.headers)
+    state.committed = true
+    state.writer.WriteHeader(state.status)
     true
   }
 }
@@ -345,22 +337,18 @@ private struct NextState {
   ran: Bool,
 }
 
-private struct NextStore {
-  state: mut NextState,
-}
-
 struct Next {
   store: Any,
 }
 
 impl Next {
   fn run(request: Request, response: mut Response) {
-    let store = unsafe::cast<NextStore>(
+    let state = unsafe::cast<mut NextState>(
       self.store,
     ).expect("invalid internal middleware continuation")
-    if not store.state.ran {
-      store.state.ran = true
-      store.state.callback(request, response)
+    if not state.ran {
+      state.ran = true
+      state.callback(request, response)
     }
   }
 }
@@ -672,8 +660,8 @@ private fn parse_query_values(raw_query: Str, name: Str) [Str] {
 }
 
 private fn make_next(callback: fn(Request, mut Response)) Next {
-  let store = NextStore{state: mut NextState{callback: callback, ran: false}}
-  Next{store: store}
+  let state = mut NextState{callback: callback, ran: false}
+  Next{store: state}
 }
 
 private fn serve_http(
@@ -851,7 +839,7 @@ private fn dispatch(
   request: Request,
   response: mut Response,
 ) {
-  response_store(deref response).state.context = Maybe::new(request.context)
+  response_state(deref response).context = Maybe::new(request.context)
   if index < middleware_handlers.size() {
     let middleware = middleware_handlers.at(index).expect("middleware index is in bounds")
     let next = make_next(fn(next_request: Request, next_response: mut Response) {
@@ -1058,13 +1046,13 @@ private fn valid_path_param_name(name: Str) Bool {
 }
 
 private fn finalize_response(method: Str, response: Response) Response {
-  let store = response_store(response)
-  if store.state.mode == ResponseMode::SSE and (response.status != 200 or response.body.size() > 0) {
+  let state = response_state(response)
+  if state.mode == ResponseMode::SSE and (response.status != 200 or response.body.size() > 0) {
     mut replacement = response
     select_buffered(mut replacement)
     finalize_response(method, replacement)
   } else {
-    let mode = store.state.mode
+    let mode = state.mode
     let body_allowed = response.status != 204 and response.status != 205 and response.status != 304
     if response.status < 200 or response.status > 599 {
       finalize_response(method, internal_server_error())
@@ -1186,14 +1174,14 @@ private fn deliver_http_response(
   request_context_value: go_context::Context,
   response: Response,
 ) {
-  let store = response_store(response)
-  if store.state.mode == ResponseMode::SSE and method != "HEAD" {
+  let state = response_state(response)
+  if state.mode == ResponseMode::SSE and method != "HEAD" {
     deliver_sse_response(
       writer,
       request_context_value,
-      store.state.context.or(request_context_value),
+      state.context.or(request_context_value),
       response,
-      store.state.sse_handler.expect("missing SSE handler"),
+      state.sse_handler.expect("missing SSE handler"),
     )
   } else {
     write_http_response(writer, response)
@@ -1207,17 +1195,16 @@ private fn deliver_sse_response(
   response: Response,
   handler: SSEHandler,
 ) {
-  mut state = EventStreamState{
+  let state = mut EventStreamState{
     writer: writer,
     context: request_context_value,
     transport_context: transport_context,
     status: response.status,
-    headers: copy_headers(response.headers),
+    headers: response.headers.clone(),
     committed: false,
     usable: true,
   }
-  let store = EventStreamStore{state: mut state}
-  let stream = mut EventStream{store: store}
+  let stream = mut EventStream{store: state}
   let controller = http::NewResponseController(writer)
   match controller.SetWriteDeadline(time::Time{}) {
     ok => (),
@@ -1227,20 +1214,16 @@ private fn deliver_sse_response(
     handler(stream)
     commit_event_stream(stream)
   } {
-    ok(_) => { store.state.usable = false },
+    ok(_) => { state.usable = false },
     err(_) => {
-      store.state.usable = false
-      if store.state.committed {
+      state.usable = false
+      if state.committed {
         panic(http::ErrAbortHandler)
       } else {
         write_http_response(writer, finalize_response("GET", internal_server_error()))
       }
     },
   }
-}
-
-private fn copy_headers(headers: Headers) Headers {
-  headers.clone()
 }
 
 private fn copy_http_headers(writer: http::ResponseWriter, headers: Headers) {
