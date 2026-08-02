@@ -210,36 +210,24 @@ struct EventStream {
 
 impl EventStream {
   fn mut send(data: Str, event: Str?, id: Str?, retry_ms: Int?) Bool {
-    match event {
-      value => validate_sse_name("event", value),
-      _ => (),
-    }
-    match id {
-      value => validate_sse_name("id", value),
-      _ => (),
-    }
-    match retry_ms {
-      value => {
-        if value < 0 {
-          panic("SSE retry milliseconds cannot be negative")
-        }
-      },
-      _ => (),
+    validate_sse_name("event", event.or(""))
+    validate_sse_name("id", id.or(""))
+
+    if retry_ms.or(0) < 0 {
+      panic("SSE retry milliseconds cannot be negative")
     }
 
     let fields: mut [Str] = mut []
-    match event {
-      value => fields.push("event: {value}"),
-      _ => (),
-    }
-    match id {
-      value => fields.push("id: {value}"),
-      _ => (),
-    }
-    match retry_ms {
-      value => fields.push("retry: {value}"),
-      _ => (),
-    }
+    event.map(fn(value) {
+      fields.push("event: {value}")
+    })
+    id.map(fn(value) {
+      fields.push("id: {value}")
+    })
+    retry_ms.map(fn(value) {
+      fields.push("retry: {value}")
+    })
+
     for line in sse_lines(data) {
       fields.push("data: {line}")
     }
