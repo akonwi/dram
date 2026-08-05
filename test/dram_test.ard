@@ -548,8 +548,8 @@ test fn json_helper_buffers_encoded_values_and_recovers_encoding_failures() Void
     "JSON content type changed",
   )
   let encoded_body = Str::from(encoded.body)
-  let expected_message_first = "\{\"message\":\"hello\",\"count\":2\}"
-  let expected_count_first = "\{\"count\":2,\"message\":\"hello\"\}"
+  let expected_message_first = "{{\"message\":\"hello\",\"count\":2}}"
+  let expected_count_first = "{{\"count\":2,\"message\":\"hello\"}}"
   try testing::assert(
     encoded_body == expected_message_first or encoded_body == expected_count_first,
     "JSON body changed: {encoded_body}",
