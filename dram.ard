@@ -26,37 +26,37 @@ impl Headers {
   fn get(name: Str) Str? {
     self._raw.Values(name).at(0)
   }
-
+  
   fn values(name: Str) [Str] {
     let copied: mut [Str] = mut []
     for value in self._raw.Values(name) {
       copied.push(value)
     }
-    deref copied
+    copied.@
   }
-
+  
   fn names() [Str] {
     let copied: mut [Str] = mut []
     for name in self._raw.keys() {
       copied.push(name)
     }
-    deref copied
+    copied.@
   }
-
+  
   fn mut set(name: Str, value: Str) {
     validate_header(name, value)
     self._raw.Set(name, value)
   }
-
+  
   fn mut add(name: Str, value: Str) {
     validate_header(name, value)
     self._raw.Add(name, value)
   }
-
+  
   fn mut delete(name: Str) {
     self._raw.Del(name)
   }
-
+  
   fn clone() Headers {
     Headers{_raw: self._raw.Clone()}
   }
@@ -89,15 +89,15 @@ impl Request {
   fn param(name: Str) Str? {
     self.path_params.get(name)
   }
-
+  
   fn query(name: Str) Str? {
     self.query_list(name).at(0)
   }
-
+  
   fn query_list(name: Str) [Str] {
     parse_query_values(self.raw_query, name)
   }
-
+  
   fn with_context(context: go_context::Context) Request {
     Request{
       method: self.method,
@@ -148,27 +148,27 @@ impl Response {
     self.headers.set("Content-Type", "text/plain; charset=utf-8")
     self.body = body.bytes()
   }
-
+  
   fn mut bytes(status: Int, body: [Byte]) {
     self.data(status, "application/octet-stream", body)
   }
-
+  
   fn mut data(status: Int, content_type: Str, body: [Byte]) {
     select_buffered(self)
     self.status = status
     self.headers.set("Content-Type", content_type)
     self.body = body
   }
-
+  
   fn mut json(status: Int, value: Any) {
     match json::Marshal(value) {
       ok(body) => self.data(status, "application/json; charset=utf-8", body),
       err(message) => panic("failed to encode JSON response: {message}"),
     }
   }
-
+  
   fn mut sse(handler: SSEHandler) {
-    let state = response_state(deref self)
+    let state = response_state(self.@)
     state.mode = ResponseMode::SSE
     state.sse_handler = Maybe::new(handler)
     self.status = 200
@@ -184,7 +184,7 @@ private fn response_state(response: Response) mut ResponseState {
 }
 
 private fn select_buffered(response: mut Response) {
-  let state = response_state(deref response)
+  let state = response_state(response.@)
   if state.mode == ResponseMode::SSE {
     response.headers.delete("Content-Type")
     response.headers.delete("Cache-Control")
@@ -212,11 +212,11 @@ impl EventStream {
   fn mut send(data: Str, event: Str?, id: Str?, retry_ms: Int?) Bool {
     validate_sse_name("event", event.or(""))
     validate_sse_name("id", id.or(""))
-
+    
     if retry_ms.or(0) < 0 {
       panic("SSE retry milliseconds cannot be negative")
     }
-
+    
     let fields: mut [Str] = mut []
     event.map(fn(value) {
       fields.push("event: {value}")
@@ -227,13 +227,13 @@ impl EventStream {
     retry_ms.map(fn(value) {
       fields.push("retry: {value}")
     })
-
+    
     for line in sse_lines(data) {
       fields.push("data: {line}")
     }
     self.write_and_flush("{strings::Join(fields, "\n")}\n\n")
   }
-
+  
   fn mut comment(text: Str) Bool {
     let fields: mut [Str] = mut []
     for line in sse_lines(text) {
@@ -241,12 +241,12 @@ impl EventStream {
     }
     self.write_and_flush("{strings::Join(fields, "\n")}\n\n")
   }
-
+  
   fn cancelled() Bool {
     let state = event_stream_state(mut self)
     (not state.usable) or request_context::err(state.context).is_some() or request_context::err(state.transport_context).is_some()
   }
-
+  
   private fn mut write_and_flush(body: Str) Bool {
     let state = event_stream_state(self)
     if (not state.usable) or request_context::err(state.context).is_some() or request_context::err(state.transport_context).is_some() {
@@ -403,23 +403,23 @@ impl App {
     }
     self.max_body_bytes = max_body_bytes
   }
-
+  
   fn mut use(middleware: Middleware) {
     self.middleware_handlers.push(middleware)
   }
-
+  
   fn mut not_found(handler: Handler) {
     self._not_found_handler = Maybe::new(handler)
   }
-
+  
   fn mut method_not_allowed(handler: Handler) {
     self._method_not_allowed_handler = Maybe::new(handler)
   }
-
+  
   fn mut route(method: Str, path: Str, handler: Handler) {
     register_route(self, method, path, [], handler)
   }
-
+  
   fn mut group(prefix: Str) Group {
     validate_group_prefix(prefix)
     Group{
@@ -428,39 +428,39 @@ impl App {
       _middleware_handlers: [],
     }
   }
-
+  
   fn mut get(path: Str, handler: Handler) {
     self.route("GET", path, handler)
   }
-
+  
   fn mut head(path: Str, handler: Handler) {
     self.route("HEAD", path, handler)
   }
-
+  
   fn mut post(path: Str, handler: Handler) {
     self.route("POST", path, handler)
   }
-
+  
   fn mut put(path: Str, handler: Handler) {
     self.route("PUT", path, handler)
   }
-
+  
   fn mut patch(path: Str, handler: Handler) {
     self.route("PATCH", path, handler)
   }
-
+  
   fn mut delete(path: Str, handler: Handler) {
     self.route("DELETE", path, handler)
   }
-
+  
   fn mut options(path: Str, handler: Handler) {
     self.route("OPTIONS", path, handler)
   }
-
+  
   fn mut trace(path: Str, handler: Handler) {
     self.route("TRACE", path, handler)
   }
-
+  
   fn handle(request: Request) Response {
     let fallback_handlers = FallbackHandlers{
       not_found: self._not_found_handler,
@@ -474,7 +474,7 @@ impl App {
       request,
     )
   }
-
+  
   fn listen(port: Int, host: Str?) Void!Str {
     if port < 0 or port > 65535 {
       Result::err("port must be between 0 and 65535")
@@ -491,8 +491,8 @@ impl App {
       let server = mut http::Server{}
       server.Addr = address
       server.Handler = App{
-        middleware_handlers: deref middleware_handlers,
-        routes: deref routes,
+        middleware_handlers: middleware_handlers.@,
+        routes: routes.@,
         max_body_bytes: self.max_body_bytes,
         _not_found_handler: self._not_found_handler,
         _method_not_allowed_handler: self._method_not_allowed_handler,
@@ -517,9 +517,9 @@ impl Group {
   fn mut use(middleware: Middleware) {
     let middleware_handlers = mut copy_middleware(self._middleware_handlers)
     middleware_handlers.push(middleware)
-    self._middleware_handlers = deref middleware_handlers
+    self._middleware_handlers = middleware_handlers.@
   }
-
+  
   fn mut group(prefix: Str) Group {
     validate_group_prefix(prefix)
     Group{
@@ -528,7 +528,7 @@ impl Group {
       _middleware_handlers: copy_middleware(self._middleware_handlers),
     }
   }
-
+  
   fn mut route(method: Str, path: Str, handler: Handler) {
     validate_route_path(path)
     register_route(
@@ -539,35 +539,35 @@ impl Group {
       handler,
     )
   }
-
+  
   fn mut get(path: Str, handler: Handler) {
     self.route("GET", path, handler)
   }
-
+  
   fn mut head(path: Str, handler: Handler) {
     self.route("HEAD", path, handler)
   }
-
+  
   fn mut post(path: Str, handler: Handler) {
     self.route("POST", path, handler)
   }
-
+  
   fn mut put(path: Str, handler: Handler) {
     self.route("PUT", path, handler)
   }
-
+  
   fn mut patch(path: Str, handler: Handler) {
     self.route("PATCH", path, handler)
   }
-
+  
   fn mut delete(path: Str, handler: Handler) {
     self.route("DELETE", path, handler)
   }
-
+  
   fn mut options(path: Str, handler: Handler) {
     self.route("OPTIONS", path, handler)
   }
-
+  
   fn mut trace(path: Str, handler: Handler) {
     self.route("TRACE", path, handler)
   }
@@ -607,7 +607,7 @@ private fn copy_middleware(middleware_handlers: [Middleware]) [Middleware] {
   for middleware in middleware_handlers {
     copied.push(middleware)
   }
-  deref copied
+  copied.@
 }
 
 private fn join_group_prefix(parent: Str, child: Str) Str {
@@ -666,7 +666,7 @@ private fn serve_http(
       headers.add(name, value)
     }
   }
-
+  
   if raw_request.ContentLength > Int64::from(max_body_bytes) {
     raw_request.Body.Close()
     deliver_http_response(
@@ -692,7 +692,7 @@ private fn serve_http(
             method: raw_request.Method,
             path: raw_request.URL.Path,
             raw_query: raw_request.URL.RawQuery,
-            headers: deref headers,
+            headers: headers.@,
             body: body,
             context: raw_request.Context(),
             path_params: [:],
@@ -773,7 +773,7 @@ private fn handle_request(
   mut allowed_methods: [Str] = []
   let method = request.method
   let path_segments = strings::Split(request.path, "/")
-
+  
   for route in routes {
     let matched = match_route(route.segments, path_segments)
     if matched.matches {
@@ -797,7 +797,7 @@ private fn handle_request(
   if list_contains(allowed_methods, "GET") {
     allowed_methods = append_unique(allowed_methods, "HEAD")
   }
-
+  
   mut selected_handler: Handler? = Maybe::new()
   let selected_middleware = mut copy_middleware(middleware_handlers)
   if route_index >= 0 {
@@ -813,11 +813,11 @@ private fn handle_request(
   } else {
     selected_handler = fallback_handlers.not_found
   }
-
+  
   let routed_request = mut request
   routed_request.path_params = route_params
-  dispatch(deref selected_middleware, 0, selected_handler, deref routed_request, response)
-  deref response
+  dispatch(selected_middleware.@, 0, selected_handler, routed_request.@, response)
+  response.@
 }
 
 private fn dispatch(
@@ -827,7 +827,7 @@ private fn dispatch(
   request: Request,
   response: mut Response,
 ) {
-  response_state(deref response).context = Maybe::new(request.context)
+  response_state(response.@).context = Maybe::new(request.context)
   if index < middleware_handlers.size() {
     let middleware = middleware_handlers.at(index).expect("middleware index is in bounds")
     let next = make_next(fn(next_request: Request, next_response: mut Response) {
@@ -874,7 +874,7 @@ private fn compile_route(path: Str) [RouteSegment] {
       segments.push(RouteSegment{value: segment, name: Maybe::new()})
     }
   }
-  deref segments
+  segments.@
 }
 
 private fn route_segment_is_catch_all(segment: RouteSegment) Bool {
@@ -990,7 +990,7 @@ private fn match_route(route_segments: [RouteSegment], path_segments: [Str]) Rou
       }
     }
   }
-  RouteMatch{matches: matches, params: deref params}
+  RouteMatch{matches: matches, params: params.@}
 }
 
 private fn route_is_preferred(routes: [Route], current_index: Int, candidate: Route) Bool {
@@ -1062,7 +1062,7 @@ private fn finalize_response(method: Str, response: Response) Response {
       if method == "HEAD" or not body_allowed or mode == ResponseMode::SSE {
         finalized.body = []
       }
-      deref finalized
+      finalized.@
     }
   }
 }
@@ -1070,19 +1070,19 @@ private fn finalize_response(method: Str, response: Response) Response {
 private fn internal_server_error() Response {
   let response = mut Response::new()
   response.text(500, "Internal Server Error")
-  deref response
+  response.@
 }
 
 private fn payload_too_large() Response {
   let response = mut Response::new()
   response.text(413, "Payload Too Large")
-  deref response
+  response.@
 }
 
 private fn bad_request() Response {
   let response = mut Response::new()
   response.text(400, "Bad Request")
-  deref response
+  response.@
 }
 
 private fn validate_route(method: Str, path: Str) {
@@ -1153,7 +1153,7 @@ private fn append_unique(values: [Str], value: Str) [Str] {
   if not list_contains(values, value) {
     result.push(value)
   }
-  deref result
+  result.@
 }
 
 private fn deliver_http_response(

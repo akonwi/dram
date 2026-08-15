@@ -54,7 +54,7 @@ test fn exact_route_uses_captured_dependency_and_middleware() Void!Str {
   app.get("/hello", fn(request: dram::Request, response: mut dram::Response) {
     response.text(200, "{greeting}, Dram!")
   })
-
+  
   let response = app.handle(dram::Request::new("GET", "/hello"))
   try testing::assert(response.status == 200, "GET route did not return 200")
   try testing::assert(
@@ -75,11 +75,11 @@ test fn middleware_runs_for_not_found_and_method_not_allowed() Void!Str {
   app.get("/known", fn(request: dram::Request, response: mut dram::Response) {
     response.text(200, "known")
   })
-
+  
   let missing = app.handle(dram::Request::new("GET", "/missing"))
   try testing::assert(missing.status == 404, "missing path did not return 404")
   try testing::assert(missing.headers.get("X-Middleware").or("") == "yes", "middleware skipped 404")
-
+  
   let wrong_method = app.handle(dram::Request::new("POST", "/known"))
   try testing::assert(wrong_method.status == 405, "wrong method did not return 405")
   try testing::assert(wrong_method.headers.get("Allow").or("") == "GET, HEAD", "Allow header changed")
@@ -99,7 +99,7 @@ test fn custom_not_found_and_method_not_allowed_handlers_run_with_global_middlew
   app.method_not_allowed(fn(request, response) {
     response.text(response.status, "method:{request.param("id").or("missing")}")
   })
-
+  
   let api = mut app.group("/api")
   api.use(fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
     response.headers.set("X-Group", "yes")
@@ -108,7 +108,7 @@ test fn custom_not_found_and_method_not_allowed_handlers_run_with_global_middlew
   api.get("/users/:id", fn(request, response) {
     response.text(200, request.param("id").or(""))
   })
-
+  
   let missing = app.handle(dram::Request::new("GET", "/api/missing"))
   try testing::assert(missing.status == 404, "custom not-found status changed")
   try testing::assert(
@@ -123,7 +123,7 @@ test fn custom_not_found_and_method_not_allowed_handlers_run_with_global_middlew
     missing.headers.get("X-Group").is_none(),
     "group middleware wrapped not-found handler",
   )
-
+  
   let wrong_method = app.handle(dram::Request::new("POST", "/api/users/42"))
   try testing::assert(wrong_method.status == 405, "custom method-not-allowed status changed")
   try testing::assert(
@@ -142,7 +142,7 @@ test fn custom_not_found_and_method_not_allowed_handlers_run_with_global_middlew
     wrong_method.headers.get("X-Group").is_none(),
     "group middleware wrapped 405 handler",
   )
-
+  
   let head_missing = app.handle(dram::Request::new("HEAD", "/missing"))
   try testing::assert(
     head_missing.status == 404 and head_missing.body.size() == 0,
@@ -166,19 +166,19 @@ test fn path_params_are_available_to_middleware_and_handlers() Void!Str {
     let missing = request.param("missing").or("")
     response.text(200, "{id}:{missing}")
   })
-
+  
   let response = app.handle(dram::Request::new("GET", "/users/42"))
   try testing::assert(response.status == 200, "parameter route did not match")
   try testing::assert(Str::from(response.body) == "42:", "path parameter lookup changed")
   try testing::assert(response.headers.get("X-User-Id").or("") == "42", "middleware missed path params")
-
+  
   let head = app.handle(dram::Request::new("HEAD", "/users/42"))
   try testing::assert(head.status == 200 and head.body.size() == 0, "HEAD parameter fallback failed")
   try testing::assert(head.headers.get("X-User-Id").or("") == "42", "HEAD fallback lost path params")
-
+  
   let empty = app.handle(dram::Request::new("GET", "/users/"))
   try testing::assert(empty.status == 404, "path parameter matched an empty segment")
-
+  
   let wrong_method = app.handle(dram::Request::new("POST", "/users/42"))
   try testing::assert(wrong_method.status == 405, "parameter path did not produce 405")
   try testing::assert(
@@ -200,7 +200,7 @@ test fn catch_all_params_capture_the_remaining_path() Void!Str {
   app.post("/files/*path", fn(request, response) {
     response.text(201, request.param("path").or("missing"))
   })
-
+  
   let nested = app.handle(dram::Request::new("GET", "/files/images/logo.png"))
   try testing::assert(Str::from(nested.body) == "/images/logo.png", "catch-all remainder changed")
   try testing::assert(
@@ -228,7 +228,7 @@ test fn catch_all_routes_validate_and_reject_overlaps() Void!Str {
     static_first.get("/files/*path", fn(request, response) {})
   }
   try testing::assert(static_overlap.is_err(), "catch-all overlapped a static route")
-
+  
   let catch_all_first = mut dram::App::new()
   catch_all_first.get("/files/*path", fn(request, response) {})
   let parameter_overlap = unsafe {
@@ -239,7 +239,7 @@ test fn catch_all_routes_validate_and_reject_overlaps() Void!Str {
     catch_all_first.get("/files/", fn(request, response) {})
   }
   try testing::assert(trailing_overlap.is_err(), "trailing-slash route overlapped a catch-all")
-
+  
   let non_final = unsafe {
     catch_all_first.get("/assets/*path/edit", fn(request, response) {})
   }
@@ -252,7 +252,7 @@ test fn catch_all_routes_validate_and_reject_overlaps() Void!Str {
     catch_all_first.get("/orgs/:id/files/*id", fn(request, response) {})
   }
   try testing::assert(duplicate_name.is_err(), "duplicate catch-all name was accepted")
-
+  
   let compatible = mut dram::App::new()
   compatible.get("/files", fn(request, response) {
     response.text(200, "prefix")
@@ -280,10 +280,10 @@ test fn query_accessors_lazily_decode_raw_queries() Void!Str {
   try testing::assert(items.size() == 2, "repeated query values were not preserved")
   try testing::assert(items.at(0).or("") == "one", "first repeated query value changed")
   try testing::assert(items.at(1).or("") == "two words", "second repeated query value changed")
-
+  
   let derived = query_request.with_context(request_context::background())
   try testing::assert(derived.query("q").or("") == "hello world", "derived request lost its raw query")
-
+  
   let app = mut dram::App::new()
   app.get("/search", fn(request, response) {
     response.text(200, request.query("q").or("missing"))
@@ -291,12 +291,12 @@ test fn query_accessors_lazily_decode_raw_queries() Void!Str {
   let response = app.handle(query_request)
   try testing::assert(response.status == 200, "query string affected route matching")
   try testing::assert(Str::from(response.body) == "hello world", "handler could not read query")
-
+  
   let partially_malformed = dram::Request::new("GET", "/search?good=yes&bad=%zz&later=ok")
   try testing::assert(partially_malformed.query("good").or("") == "yes", "valid leading query was lost")
   try testing::assert(partially_malformed.query("bad").is_none(), "malformed query value was exposed")
   try testing::assert(partially_malformed.query("later").or("") == "ok", "valid trailing query was lost")
-
+  
   let escaped_path = dram::Request::new("GET", "/files/hello%20world?q=yes")
   try testing::assert(escaped_path.path == "/files/hello world", "escaped path was not decoded")
   let escaped_slash = dram::Request::new("GET", "/files/a%2Fb?q=yes")
@@ -319,7 +319,7 @@ test fn static_routes_outrank_params_and_equivalent_patterns_conflict() Void!Str
   app.post("/users/:name", fn(request, response) {
     response.text(201, request.param("name").or(""))
   })
-
+  
   let static_response = app.handle(dram::Request::new("GET", "/users/new"))
   try testing::assert(
     Str::from(static_response.body) == "static",
@@ -335,7 +335,7 @@ test fn static_routes_outrank_params_and_equivalent_patterns_conflict() Void!Str
     Str::from(other_method.body) == "ada",
     "same pattern shape was rejected across methods",
   )
-
+  
   let conflicting = unsafe {
     app.get("/users/:name", fn(request, response) {})
   }
@@ -350,7 +350,7 @@ test fn static_routes_outrank_params_and_equivalent_patterns_conflict() Void!Str
 test fn groups_compose_static_prefixes_and_snapshot_middleware() Void!Str {
   let app = mut dram::App::new()
   app.use(order_middleware("global,"))
-
+  
   let api = mut app.group("/api")
   api.get("/before", fn(request, response) {
     response.text(200, "before")
@@ -359,13 +359,13 @@ test fn groups_compose_static_prefixes_and_snapshot_middleware() Void!Str {
   api.get("/after", fn(request, response) {
     response.text(200, "after")
   })
-
+  
   let admin = mut api.group("/admin")
   admin.use(order_middleware("child,"))
   admin.get("/users/:id", fn(request, response) {
     response.text(200, request.param("id").or(""))
   })
-
+  
   api.use(order_middleware("late,"))
   api.get("/late", fn(request, response) {
     response.text(200, "late")
@@ -373,7 +373,7 @@ test fn groups_compose_static_prefixes_and_snapshot_middleware() Void!Str {
   admin.get("/reports", fn(request, response) {
     response.text(200, "reports")
   })
-
+  
   let before = app.handle(dram::Request::new("GET", "/api/before"))
   try testing::assert(
     before.headers.get("X-Order").or("") == "global,",
@@ -400,7 +400,7 @@ test fn groups_compose_static_prefixes_and_snapshot_middleware() Void!Str {
     child_after_late.headers.get("X-Order").or("") == "global,parent,child,",
     "existing child inherited middleware added later to its parent",
   )
-
+  
   let missing = app.handle(dram::Request::new("GET", "/api/missing"))
   try testing::assert(missing.status == 404, "missing grouped route did not return 404")
   try testing::assert(missing.headers.get("X-Order").or("") == "global,", "group middleware ran for 404")
@@ -419,9 +419,9 @@ test fn copied_groups_isolate_middleware_snapshots() Void!Str {
   base.use(order_middleware("one,"))
   base.use(order_middleware("two,"))
   base.use(order_middleware("three,"))
-
-  let left = mut deref base
-  let right = mut deref base
+  
+  let left = mut base.@
+  let right = mut base.@
   left.use(order_middleware("left,"))
   right.use(order_middleware("right,"))
   left.get("/left", fn(request, response) {
@@ -430,7 +430,7 @@ test fn copied_groups_isolate_middleware_snapshots() Void!Str {
   right.get("/right", fn(request, response) {
     response.text(200, "right")
   })
-
+  
   let left_response = app.handle(dram::Request::new("GET", "/copy/left"))
   try testing::assert(
     left_response.headers.get("X-Order").or("") == "one,two,three,left,",
@@ -448,7 +448,7 @@ test fn groups_validate_prefixes_paths_and_combined_conflicts() Void!Str {
   let app = mut dram::App::new()
   let api = mut app.group("/api")
   api.get("/users", fn(request, response) {})
-
+  
   let parameter_prefix = unsafe {
     app.group("/orgs/:id")
   }
@@ -484,7 +484,7 @@ test fn middleware_short_circuits_by_omitting_next() Void!Str {
   app.get("/private", fn(request: dram::Request, response: mut dram::Response) {
     response.text(200, "should not run")
   })
-
+  
   let response = app.handle(dram::Request::new("GET", "/private"))
   try testing::assert(response.status == 401, "short circuit did not preserve middleware status")
   try testing::assert(Str::from(response.body) == "Unauthorized", "short-circuited route still ran")
@@ -504,7 +504,7 @@ test fn context_values_propagate_without_key_collisions() Void!Str {
     let second = str_value(request, second_key).or("missing")
     response.text(200, "{request.path}:{first}:{second}")
   })
-
+  
   let response = app.handle(dram::Request::new("GET", "/values"))
   try testing::assert(
     Str::from(response.body) == "/values:first:missing",
@@ -540,7 +540,7 @@ test fn json_helper_buffers_encoded_values_and_recovers_encoding_failures() Void
     response.text(202, "partial")
     response.json(200, fn() {})
   })
-
+  
   let encoded = app.handle(dram::Request::new("GET", "/json"))
   try testing::assert(encoded.status == 201, "JSON helper status changed")
   try testing::assert(
@@ -554,14 +554,14 @@ test fn json_helper_buffers_encoded_values_and_recovers_encoding_failures() Void
     encoded_body == expected_message_first or encoded_body == expected_count_first,
     "JSON body changed: {encoded_body}",
   )
-
+  
   let head = app.handle(dram::Request::new("HEAD", "/json"))
   try testing::assert(
     head.status == 201 and head.body.size() == 0,
     "HEAD JSON response retained its body",
   )
   try testing::assert(head.headers.get("Content-Length").or("0") != "0", "HEAD JSON length was lost")
-
+  
   let failed = app.handle(dram::Request::new("GET", "/bad-json"))
   try testing::assert(failed.status == 500, "JSON encoding failure did not recover")
   try testing::assert(Str::from(failed.body) == "Internal Server Error", "JSON error exposed details")
@@ -577,10 +577,10 @@ test fn post_can_read_headers_and_return_buffered_bytes() Void!Str {
   let headers = mut dram::Headers::new()
   headers.set("x-test", "present")
   let request = mut dram::Request::new("POST", "/echo")
-  request.headers = deref headers
+  request.headers = headers.@
   request.body = "bytes".bytes()
-
-  let response = app.handle(deref request)
+  
+  let response = app.handle(request.@)
   try testing::assert(response.status == 201, "POST route did not return 201")
   try testing::assert(Str::from(response.body) == "bytes", "byte response changed")
   try testing::assert(response.headers.get("X-Seen").or("") == "present", "request header missing")
@@ -596,7 +596,7 @@ test fn headers_preserve_repeated_values_and_own_framing() Void!Str {
   headers.add("set-cookie", "a=1")
   headers.add("Set-Cookie", "b=2")
   try testing::assert(headers.values("SET-COOKIE").size() == 2, "repeated values collapsed")
-
+  
   let app = mut dram::App::new()
   app.get("/framing", fn(request: dram::Request, response: mut dram::Response) {
     response.headers.set("Content-Length", "1")
@@ -617,14 +617,14 @@ test fn cloned_headers_are_independent() Void!Str {
   original.set("X-Mode", "original")
   original.add("Set-Cookie", "a=1")
   original.add("Set-Cookie", "b=2")
-
+  
   let cloned = mut original.clone()
   cloned.set("X-Mode", "clone")
   cloned.delete("Set-Cookie")
-
+  
   let returned_values = mut original.values("Set-Cookie")
   returned_values.push("c=3")
-
+  
   try testing::assert(original.get("X-Mode").or("") == "original", "clone mutated original value")
   try testing::assert(original.values("Set-Cookie").size() == 2, "returned values exposed stored slice")
   try testing::assert(cloned.get("X-Mode").or("") == "clone", "clone did not replace its value")
@@ -651,8 +651,8 @@ test fn body_limit_returns_413_before_dispatch() Void!Str {
   })
   let request = mut dram::Request::new("POST", "/upload")
   request.body = "large".bytes()
-
-  let response = app.handle(deref request)
+  
+  let response = app.handle(request.@)
   try testing::assert(response.status == 413, "oversized request did not return 413")
   testing::pass()
 }
@@ -666,7 +666,7 @@ test fn head_falls_back_to_get_and_prefers_explicit_head() Void!Str {
   let fallback = app.handle(dram::Request::new("HEAD", "/resource"))
   try testing::assert(fallback.status == 200 and fallback.body.size() == 0, "HEAD fallback failed")
   try testing::assert(fallback.headers.get("Content-Length").or("") == "8", "HEAD length changed")
-
+  
   app.head("/resource", fn(request: dram::Request, response: mut dram::Response) {
     response.headers.set("X-Handler", "HEAD")
     response.text(202, "head body")
@@ -748,10 +748,10 @@ test fn app_converts_to_an_isolated_standard_handler_snapshot() Void!Str {
   app.post("/body", fn(request, response) {
     response.text(200, Str::from(request.body))
   })
-
-  let handler: http::Handler = deref app
-  let server = http::Server{Addr: "127.0.0.1:0", Handler: deref app}
-
+  
+  let handler: http::Handler = app.@
+  let server = http::Server{Addr: "127.0.0.1:0", Handler: app.@}
+  
   app.set_max_body_bytes(1)
   app.use(fn(request, response, next) {
     response.headers.set("X-Snapshot", "after")
@@ -763,16 +763,16 @@ test fn app_converts_to_an_isolated_standard_handler_snapshot() Void!Str {
   app.get("/after", fn(request, response) {
     response.text(200, "after")
   })
-
+  
   let before = serve_test_request(handler, "GET", "/before", "")
   try testing::assert(before.Code == 200, "snapshot lost its registered route")
   try testing::assert(before.Body.String() == "before", "snapshot route response changed")
   try testing::assert(before.Header().Get("X-Snapshot") == "before", "snapshot middleware changed")
-
+  
   let after = serve_test_request(handler, "GET", "/after", "")
   try testing::assert(after.Code == 404, "snapshot observed a later route")
   try testing::assert(after.Body.String() == "old fallback", "snapshot fallback changed")
-
+  
   let body = serve_test_request(handler, "POST", "/body", "four")
   try testing::assert(body.Code == 200, "snapshot body limit changed")
   try testing::assert(body.Body.String() == "four", "snapshot request body changed")
@@ -785,7 +785,7 @@ test fn mutable_http_handler_reference_observes_later_registration() Void!Str {
   app.get("/later", fn(request, response) {
     response.text(200, "later")
   })
-
+  
   let response = serve_test_request(handler, "GET", "/later", "")
   try testing::assert(response.Code == 200, "mutable handler reference stopped sharing configuration")
   testing::pass()
@@ -833,7 +833,7 @@ test fn sse_formats_events_flushes_and_waits_for_middleware() Void!Str {
       }
     })
   })
-
+  
   let handler: http::Handler = app
   let response = serve_test_request(handler, "GET", "/events", "")
   try testing::assert(response.Code == 200, "SSE status changed")
@@ -872,12 +872,12 @@ test fn sse_recovery_respects_commitment() Void!Str {
       panic("after first event")
     })
   })
-
+  
   let handler: http::Handler = app
   let before = serve_test_request(handler, "GET", "/before", "")
   try testing::assert(before.Code == 500, "pre-commit panic did not become 500")
   try testing::assert(before.Body.String() == "Internal Server Error", "pre-commit panic leaked")
-
+  
   let after = httptest::NewRecorder()
   let after_request = httptest::NewRequest("GET", "/after", strings::NewReader(""))
   let outcome = unsafe {
@@ -901,7 +901,7 @@ test fn sse_validates_fields_before_commitment() Void!Str {
       events.send(data: "hidden", retry_ms: -1)
     })
   })
-
+  
   let handler: http::Handler = app
   let invalid_id = serve_test_request(handler, "GET", "/invalid-id", "")
   try testing::assert(invalid_id.Code == 500, "invalid SSE id was accepted")
@@ -939,7 +939,7 @@ test fn sse_head_and_delivery_replacement_are_safe() Void!Str {
       panic("blocked SSE callback executed")
     })
   })
-
+  
   let handler: http::Handler = app
   let head = serve_test_request(handler, "HEAD", "/events", "")
   try testing::assert(head.Code == 200 and head.Body.String() == "", "HEAD executed SSE delivery")
@@ -988,14 +988,14 @@ test fn corrupted_opaque_delivery_state_fails_safely() Void!Str {
       events.send(data: "hidden")
     })
   })
-
+  
   let handler: http::Handler = app
   let corrupted_response = serve_test_request(handler, "GET", "/response", "")
   try testing::assert(corrupted_response.Code == 500, "corrupted response state escaped recovery")
-
+  
   let before = serve_test_request(handler, "GET", "/events-before", "")
   try testing::assert(before.Code == 500, "pre-commit event state corruption escaped recovery")
-
+  
   let after = httptest::NewRecorder()
   let after_request = httptest::NewRequest("GET", "/events-after", strings::NewReader(""))
   let outcome = unsafe {
