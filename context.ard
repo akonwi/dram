@@ -27,7 +27,7 @@ fn done(ctx: context::Context) Receiver<Void> {
 fn err(ctx: context::Context) Str? {
   match ctx.Err() {
     ok => Maybe::new(),
-    err(message) => Maybe::new(message),
+    err(error) => Maybe::new(error.error()),
   }
 }
 

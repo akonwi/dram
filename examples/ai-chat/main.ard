@@ -49,7 +49,7 @@ fn main() {
             }
           })
         },
-        err(message) => response.text(400, message),
+        err(error) => response.text(400, error.error()),
       }
     }
   })
