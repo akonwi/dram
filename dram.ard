@@ -14,6 +14,10 @@ use go:time
 let DEFAULT_MAX_BODY_BYTES = 1_048_576
 let DEFAULT_MAX_HEADER_BYTES = DEFAULT_MAX_BODY_BYTES
 
+private fn error_message(error: Error) Str {
+  error.error()
+}
+
 struct Headers {
   _raw: http::Header,
 }
@@ -502,7 +506,7 @@ impl App {
       server.WriteTimeout = 30 * time::Second
       server.IdleTimeout = 120 * time::Second
       server.MaxHeaderBytes = DEFAULT_MAX_HEADER_BYTES
-      server.ListenAndServe()
+      server.ListenAndServe().map_err(error_message)
     }
   }
 }
