@@ -16,20 +16,20 @@ fn main() {
     response.headers.add("Set-Cookie", "second=2; HttpOnly; SameSite=Lax")
     response.text(200, "Hello from Dram")
   })
-  
+
   app.get("/hello/:name", fn(request, response) {
     let name = request.param("name").or("world")
     response.text(200, "Hello {name}!")
   })
-  
+
   app.get("/files/*path", fn(request, response) {
     response.text(200, request.param("path").or(""))
   })
-  
+
   app.get("/json", fn(request, response) {
     response.json(200, ["message": "Hello from Dram"])
   })
-  
+
   app.get("/events", fn(request, response) {
     response.sse(fn(stream) {
       active_event_streams.Add(Int64::from(1))
@@ -45,11 +45,11 @@ fn main() {
       }
     })
   })
-  
+
   app.get("/events/active", fn(request, response) {
     response.text(200, strconv::FormatInt(active_event_streams.Load(), 10))
   })
-  
+
   app.get("/events/panic", fn(request, response) {
     response.sse(fn(stream) {
       stream.send(data: "visible")
@@ -57,21 +57,21 @@ fn main() {
       panic("after SSE commitment")
     })
   })
-  
+
   app.get("/search", fn(request, response) {
     response.text(200, request.query("q").or(""))
   })
-  
+
   app.post("/echo", fn(request: dram::Request, response: mut dram::Response) {
     response.bytes(200, request.body)
   })
-  
+
   app.not_found(fn(request, response) {
     response.text(404, "Not Found: {request.path}")
   })
   app.method_not_allowed(fn(request, response) {
     response.text(405, "Method Not Allowed")
   })
-  
+
   app.listen(port: 8080).expect("Failed to start server")
 }
