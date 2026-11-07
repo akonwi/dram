@@ -4,10 +4,10 @@ use go:sync/atomic
 use go:time
 
 fn main() {
-  let app = mut dram::App::new()
-  let active_event_streams = mut atomic::Int64{}
+  let app = &mut dram::App::new()
+  let active_event_streams = &mut atomic::Int64{}
   app.set_max_body_bytes(8)
-  app.use(fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
+  app.use(fn(request: dram::Request, response: &mut dram::Response, next: dram::Next) {
     response.headers.set("X-Powered-By", "Dram")
     next.run(request, response)
   })
@@ -62,7 +62,7 @@ fn main() {
     response.text(200, request.query("q").or(""))
   })
 
-  app.post("/echo", fn(request: dram::Request, response: mut dram::Response) {
+  app.post("/echo", fn(request: dram::Request, response: &mut dram::Response) {
     response.bytes(200, request.body)
   })
 

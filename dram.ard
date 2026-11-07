@@ -32,19 +32,19 @@ impl Headers {
   }
 
   fn values(name: Str) [Str] {
-    let copied: mut [Str] = mut []
+    let copied: &mut [Str] = &mut []
     for value in self._raw.Values(name) {
       copied.push(value)
     }
-    copied.@
+    copied.*
   }
 
   fn names() [Str] {
-    let copied: mut [Str] = mut []
+    let copied: &mut [Str] = &mut []
     for name in self._raw.keys() {
       copied.push(name)
     }
-    copied.@
+    copied.*
   }
 
   fn mut set(name: Str, value: Str) {
@@ -120,7 +120,7 @@ private enum ResponseMode {
   SSE,
 }
 
-type SSEHandler = fn(mut EventStream)
+type SSEHandler = fn(&mut EventStream)
 
 private struct ResponseState {
   mode: ResponseMode,
@@ -136,7 +136,7 @@ struct Response {
 }
 
 fn Response::new() Response {
-  let state = mut ResponseState{mode: ResponseMode::Buffered}
+  let state = &mut ResponseState{mode: ResponseMode::Buffered}
   Response{
     status: 404,
     headers: Headers::new(),
@@ -172,7 +172,7 @@ impl Response {
   }
 
   fn mut sse(handler: SSEHandler) {
-    let state = response_state(self.@)
+    let state = response_state(self.*)
     state.mode = ResponseMode::SSE
     state.sse_handler = Maybe::new(handler)
     self.status = 200
@@ -183,12 +183,12 @@ impl Response {
   }
 }
 
-private fn response_state(response: Response) mut ResponseState {
-  unsafe::cast<mut ResponseState>(response._store).expect("invalid internal response state")
+private fn response_state(response: Response) &mut ResponseState {
+  unsafe::cast<&mut ResponseState>(response._store).expect("invalid internal response state")
 }
 
-private fn select_buffered(response: mut Response) {
-  let state = response_state(response.@)
+private fn select_buffered(response: &mut Response) {
+  let state = response_state(response.*)
   if state.mode == ResponseMode::SSE {
     response.headers.delete("Content-Type")
     response.headers.delete("Cache-Control")
@@ -221,7 +221,7 @@ impl EventStream {
       panic("SSE retry milliseconds cannot be negative")
     }
 
-    let fields: mut [Str] = mut []
+    let fields: &mut [Str] = &mut []
     event.map(fn(value) {
       fields.push("event: {value}")
     })
@@ -239,7 +239,7 @@ impl EventStream {
   }
 
   fn mut comment(text: Str) Bool {
-    let fields: mut [Str] = mut []
+    let fields: &mut [Str] = &mut []
     for line in sse_lines(text) {
       fields.push(": {line}")
     }
@@ -247,7 +247,7 @@ impl EventStream {
   }
 
   fn cancelled() Bool {
-    let state = event_stream_state(mut self)
+    let state = event_stream_state(&self)
     (not state.usable) or request_context::err(state.context).is_some() or request_context::err(state.transport_context).is_some()
   }
 
@@ -264,7 +264,7 @@ impl EventStream {
         ok => (),
         err(_) => (),
       }
-      let written = match state.writer.Write(mut body.bytes()) {
+      let written = match state.writer.Write(&mut body.bytes()) {
         err(_) => {
           state.usable = false
           -1
@@ -292,11 +292,11 @@ impl EventStream {
   }
 }
 
-private fn event_stream_state(stream: mut EventStream) mut EventStreamState {
-  unsafe::cast<mut EventStreamState>(stream.store).expect("invalid internal event stream state")
+private fn event_stream_state(stream: &EventStream) &mut EventStreamState {
+  unsafe::cast<&mut EventStreamState>(stream.store).expect("invalid internal event stream state")
 }
 
-private fn commit_event_stream(stream: mut EventStream) Bool {
+private fn commit_event_stream(stream: &mut EventStream) Bool {
   let state = event_stream_state(stream)
   if state.committed {
     true
@@ -321,11 +321,11 @@ private fn sse_lines(value: Str) [Str] {
   strings::Split(strings::ReplaceAll(strings::ReplaceAll(value, "\r\n", "\n"), "\r", "\n"), "\n")
 }
 
-type Handler = fn(Request, mut Response)
-type Middleware = fn(Request, mut Response, Next)
+type Handler = fn(Request, &mut Response)
+type Middleware = fn(Request, &mut Response, Next)
 
 private struct NextState {
-  callback: fn(Request, mut Response),
+  callback: fn(Request, &mut Response),
   ran: Bool,
 }
 
@@ -334,8 +334,8 @@ struct Next {
 }
 
 impl Next {
-  fn run(request: Request, response: mut Response) {
-    let state = unsafe::cast<mut NextState>(
+  fn run(request: Request, response: &mut Response) {
+    let state = unsafe::cast<&mut NextState>(
       self.store,
     ).expect("invalid internal middleware continuation")
     if not state.ran {
@@ -372,7 +372,7 @@ private struct FallbackHandlers {
 }
 
 impl http::Handler for App {
-  fn serve_h_t_t_p(writer: http::ResponseWriter, raw_request: mut http::Request) {
+  fn serve_h_t_t_p(writer: http::ResponseWriter, raw_request: &mut http::Request) {
     let fallback_handlers = FallbackHandlers{
       not_found: self._not_found_handler,
       method_not_allowed: self._method_not_allowed_handler,
@@ -484,19 +484,19 @@ impl App {
       Result::err("port must be between 0 and 65535")
     } else {
       let address = net::JoinHostPort(host.or("127.0.0.1"), strconv::Itoa(port))
-      let middleware_handlers: mut [Middleware] = mut []
+      let middleware_handlers: &mut [Middleware] = &mut []
       for middleware in self.middleware_handlers {
         middleware_handlers.push(middleware)
       }
-      let routes: mut [Route] = mut []
+      let routes: &mut [Route] = &mut []
       for route in self.routes {
         routes.push(route)
       }
-      let server = mut http::Server{}
+      let server = &mut http::Server{}
       server.Addr = address
       server.Handler = App{
-        middleware_handlers: middleware_handlers.@,
-        routes: routes.@,
+        middleware_handlers: middleware_handlers.*,
+        routes: routes.*,
         max_body_bytes: self.max_body_bytes,
         _not_found_handler: self._not_found_handler,
         _method_not_allowed_handler: self._method_not_allowed_handler,
@@ -512,16 +512,16 @@ impl App {
 }
 
 struct Group {
-  _app: mut App,
+  _app: &mut App,
   _prefix: Str,
   _middleware_handlers: [Middleware],
 }
 
 impl Group {
   fn mut use(middleware: Middleware) {
-    let middleware_handlers = mut copy_middleware(self._middleware_handlers)
+    let middleware_handlers = &mut copy_middleware(self._middleware_handlers)
     middleware_handlers.push(middleware)
-    self._middleware_handlers = middleware_handlers.@
+    self._middleware_handlers = middleware_handlers.*
   }
 
   fn mut group(prefix: Str) Group {
@@ -578,7 +578,7 @@ impl Group {
 }
 
 private fn register_route(
-  app: mut App,
+  app: &mut App,
   method: Str,
   path: Str,
   middleware_handlers: [Middleware],
@@ -607,11 +607,11 @@ private fn register_route(
 }
 
 private fn copy_middleware(middleware_handlers: [Middleware]) [Middleware] {
-  let copied: mut [Middleware] = mut []
+  let copied: &mut [Middleware] = &mut []
   for middleware in middleware_handlers {
     copied.push(middleware)
   }
-  copied.@
+  copied.*
 }
 
 private fn join_group_prefix(parent: Str, child: Str) Str {
@@ -645,14 +645,14 @@ private fn parse_request_target(target: Str) RequestTarget {
 }
 
 private fn parse_query_values(raw_query: Str, name: Str) [Str] {
-  let parsed = mut url::URL{}
+  let parsed = &mut url::URL{}
   parsed.RawQuery = raw_query
   let values = parsed.Query()
   values.get(name).or([])
 }
 
-private fn make_next(callback: fn(Request, mut Response)) Next {
-  let state = mut NextState{callback: callback, ran: false}
+private fn make_next(callback: fn(Request, &mut Response)) Next {
+  let state = &mut NextState{callback: callback, ran: false}
   Next{store: state}
 }
 
@@ -662,9 +662,9 @@ private fn serve_http(
   fallback_handlers: FallbackHandlers,
   max_body_bytes: Int,
   writer: http::ResponseWriter,
-  raw_request: mut http::Request,
+  raw_request: &mut http::Request,
 ) {
-  let headers = mut Headers::new()
+  let headers = &mut Headers::new()
   for name in raw_request.Header.keys() {
     for value in raw_request.Header.Values(name) {
       headers.add(name, value)
@@ -696,7 +696,7 @@ private fn serve_http(
             method: raw_request.Method,
             path: raw_request.URL.Path,
             raw_query: raw_request.URL.RawQuery,
-            headers: headers.@,
+            headers: headers.*,
             body: body,
             context: raw_request.Context(),
             path_params: [:],
@@ -767,7 +767,8 @@ private fn handle_request(
   fallback_handlers: FallbackHandlers,
   request: Request,
 ) Response {
-  let response = mut Response::new()
+  mut request = request
+  let response = &mut Response::new()
   mut route_index = -1
   mut route_params: [Str: Str] = [:]
   mut get_route_index = -1
@@ -803,7 +804,7 @@ private fn handle_request(
   }
 
   mut selected_handler: Handler? = Maybe::new()
-  let selected_middleware = mut copy_middleware(middleware_handlers)
+  let selected_middleware = &mut copy_middleware(middleware_handlers)
   if route_index >= 0 {
     let matched_route = routes.at(route_index).expect("matched route index is in bounds")
     selected_handler = Maybe::new(matched_route.handler)
@@ -812,16 +813,16 @@ private fn handle_request(
     }
   } else if path_found {
     response.status = 405
-    response.headers.set("Allow", strings::Join(mut allowed_methods, ", "))
+    response.headers.set("Allow", strings::Join(&mut allowed_methods, ", "))
     selected_handler = fallback_handlers.method_not_allowed
   } else {
     selected_handler = fallback_handlers.not_found
   }
 
-  let routed_request = mut request
+  let routed_request = &mut request
   routed_request.path_params = route_params
-  dispatch(selected_middleware.@, 0, selected_handler, routed_request.@, response)
-  response.@
+  dispatch(selected_middleware.*, 0, selected_handler, routed_request.*, response)
+  response.*
 }
 
 private fn dispatch(
@@ -829,12 +830,12 @@ private fn dispatch(
   index: Int,
   handler: Handler?,
   request: Request,
-  response: mut Response,
+  response: &mut Response,
 ) {
-  response_state(response.@).context = Maybe::new(request.context)
+  response_state(response.*).context = Maybe::new(request.context)
   if index < middleware_handlers.size() {
     let middleware = middleware_handlers.at(index).expect("middleware index is in bounds")
-    let next = make_next(fn(next_request: Request, next_response: mut Response) {
+    let next = make_next(fn(next_request: Request, next_response: &mut Response) {
       dispatch(middleware_handlers, index + 1, handler, next_request, next_response)
     })
     middleware(request, response, next)
@@ -852,8 +853,8 @@ private struct RouteMatch {
 }
 
 private fn compile_route(path: Str) [RouteSegment] {
-  let segments: mut [RouteSegment] = mut []
-  let parameter_names: mut [Str: Bool] = mut [:]
+  let segments: &mut [RouteSegment] = &mut []
+  let parameter_names: &mut [Str: Bool] = &mut [:]
   let path_segments = strings::Split(path, "/")
   for segment, index in path_segments {
     let parameter = strings::HasPrefix(segment, ":")
@@ -878,7 +879,7 @@ private fn compile_route(path: Str) [RouteSegment] {
       segments.push(RouteSegment{value: segment, name: Maybe::new()})
     }
   }
-  segments.@
+  segments.*
 }
 
 private fn route_segment_is_catch_all(segment: RouteSegment) Bool {
@@ -967,12 +968,12 @@ private fn match_route(route_segments: [RouteSegment], path_segments: [Str]) Rou
     true => path_segments.size() >= route_segments.size(),
     false => route_segments.size() == path_segments.size(),
   }
-  let params: mut [Str: Str] = mut [:]
+  let params: &mut [Str: Str] = &mut [:]
   if matches {
     for route_segment, index in route_segments {
       if route_segment_is_catch_all(route_segment) {
         if matches {
-          let remaining: mut [Str] = mut []
+          let remaining: &mut [Str] = &mut []
           for path_segment, path_index in path_segments {
             if path_index >= index {
               remaining.push(path_segment)
@@ -994,7 +995,7 @@ private fn match_route(route_segments: [RouteSegment], path_segments: [Str]) Rou
       }
     }
   }
-  RouteMatch{matches: matches, params: params.@}
+  RouteMatch{matches: matches, params: params.*}
 }
 
 private fn route_is_preferred(routes: [Route], current_index: Int, candidate: Route) Bool {
@@ -1038,10 +1039,11 @@ private fn valid_path_param_name(name: Str) Bool {
 }
 
 private fn finalize_response(method: Str, response: Response) Response {
+  mut response = response
   let state = response_state(response)
   if state.mode == ResponseMode::SSE and (response.status != 200 or response.body.size() > 0) {
     mut replacement = response
-    select_buffered(mut replacement)
+    select_buffered(&mut replacement)
     finalize_response(method, replacement)
   } else {
     let mode = state.mode
@@ -1051,7 +1053,7 @@ private fn finalize_response(method: Str, response: Response) Response {
     } else if method == "CONNECT" and response.status >= 200 and response.status < 300 {
       finalize_response(method, internal_server_error())
     } else {
-      let finalized = mut response
+      let finalized = &mut response
       finalized.headers.delete("Transfer-Encoding")
       finalized.headers.delete("Trailer")
       finalized.headers.delete("Content-Length")
@@ -1066,27 +1068,27 @@ private fn finalize_response(method: Str, response: Response) Response {
       if method == "HEAD" or not body_allowed or mode == ResponseMode::SSE {
         finalized.body = []
       }
-      finalized.@
+      finalized.*
     }
   }
 }
 
 private fn internal_server_error() Response {
-  let response = mut Response::new()
+  let response = &mut Response::new()
   response.text(500, "Internal Server Error")
-  response.@
+  response.*
 }
 
 private fn payload_too_large() Response {
-  let response = mut Response::new()
+  let response = &mut Response::new()
   response.text(413, "Payload Too Large")
-  response.@
+  response.*
 }
 
 private fn bad_request() Response {
-  let response = mut Response::new()
+  let response = &mut Response::new()
   response.text(400, "Bad Request")
-  response.@
+  response.*
 }
 
 private fn validate_route(method: Str, path: Str) {
@@ -1153,11 +1155,12 @@ private fn list_contains(values: [Str], expected: Str) Bool {
 }
 
 private fn append_unique(values: [Str], value: Str) [Str] {
-  let result = mut values
+  mut values = values
+  let result = &mut values
   if not list_contains(values, value) {
     result.push(value)
   }
-  result.@
+  result.*
 }
 
 private fn deliver_http_response(
@@ -1187,7 +1190,7 @@ private fn deliver_sse_response(
   response: Response,
   handler: SSEHandler,
 ) {
-  let state = mut EventStreamState{
+  let state = &mut EventStreamState{
     writer: writer,
     context: request_context_value,
     transport_context: transport_context,
@@ -1196,7 +1199,7 @@ private fn deliver_sse_response(
     committed: false,
     usable: true,
   }
-  let stream = mut EventStream{store: state}
+  let stream = &mut EventStream{store: state}
   let controller = http::NewResponseController(writer)
   match controller.SetWriteDeadline(time::Time{}) {
     ok => (),
@@ -1230,5 +1233,5 @@ private fn write_http_response(writer: http::ResponseWriter, response: Response)
   copy_http_headers(writer, response.headers)
   writer.WriteHeader(response.status)
   mut body = response.body
-  writer.Write(mut body)
+  writer.Write(&mut body)
 }

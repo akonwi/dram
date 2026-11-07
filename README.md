@@ -25,12 +25,12 @@ struct Greeter {
 
 fn main() {
   let greeter = Greeter{greeting: "Hello"}
-  mut app = dram::App::new()
-  app.use(fn(request: dram::Request, response: mut dram::Response, next: dram::Next) {
+  let app = &mut dram::App::new()
+  app.use(fn(request: dram::Request, response: &mut dram::Response, next: dram::Next) {
     response.headers.set("X-Powered-By", "Dram")
     next.run(request, response)
   })
-  app.get("/", fn(request: dram::Request, response: mut dram::Response) {
+  app.get("/", fn(request: dram::Request, response: &mut dram::Response) {
     response.text(200, "{greeter.greeting} from Dram")
   })
 
@@ -52,14 +52,14 @@ Examples:
 ```ard
 use go:net/http
 
-mut server = http::Server{
+let server = &mut http::Server{
   Addr: "0.0.0.0:8080",
-  Handler: app,
+  Handler: app.*,
 }
 server.ListenAndServe()
 ```
 
-Assign `app` by value as shown to capture its configured state. An explicit `mut app` conversion creates a live handler reference instead; applications using that form must synchronize every registration change with request dispatch.
+Assign the app by value (`app.*`) as shown to capture its configured state. Passing the `app` pointer itself creates a live handler reference instead; applications using that form must synchronize every registration change with request dispatch.
 
 ## Routing
 
@@ -87,11 +87,11 @@ The captured value includes its leading slash, so `/files/images/logo.png` produ
 Groups compose static path prefixes and middleware:
 
 ```ard
-mut api = app.group("/api")
+let api = &mut app.group("/api")
 api.use(authenticate)
 api.get("/users/:id", show_user)
 
-mut admin = api.group("/admin")
+let admin = &mut api.group("/admin")
 admin.use(require_admin)
 admin.delete("/users/:id", delete_user)
 ```
@@ -216,7 +216,7 @@ Through Go's `http.ResponseController`, Dram clears the ordinary response write 
 
 `net/http` runs handlers concurrently. Each request carries its own immutable context and receives a mutable `Response`, but captured closure data may be shared by every request. Application code must synchronize shared maps, lists, mutable references, database clients, counters, and other dependencies. Request contexts, responses, `Next`, and `EventStream` capabilities are synchronous and request-scoped; they must not be retained or used by detached work after their callback returns.
 
-Complete route and middleware registration before calling `listen` or assigning the app by value as an `http.Handler`. Both capture the configured application value for concurrent reads, and later registration changes do not affect that running server. An explicit `mut app` handler conversion shares live configuration and must not be mutated concurrently with request dispatch. `App.handle` likewise reads the application's current configuration and must not run concurrently with registration changes.
+Complete route and middleware registration before calling `listen` or assigning the app by value as an `http.Handler`. Both capture the configured application value for concurrent reads, and later registration changes do not affect that running server. Passing the `app` pointer as a handler shares live configuration and must not be mutated concurrently with request dispatch. `App.handle` likewise reads the application's current configuration and must not run concurrently with registration changes.
 
 ## Development
 
