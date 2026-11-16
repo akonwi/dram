@@ -894,36 +894,27 @@ private fn route_has_catch_all(segments: [RouteSegment]) Bool {
 }
 
 private fn route_patterns_overlap(left: [RouteSegment], right: [RouteSegment], index: Int) Bool {
-  match left.at(index) {
-    left_segment => {
-      match right.at(index) {
-        right_segment => {
-          if route_segment_is_catch_all(left_segment) or route_segment_is_catch_all(right_segment) {
-            true
-          } else if route_segments_overlap(left_segment, right_segment) {
-            route_patterns_overlap(left, right, index + 1)
-          } else {
-            false
-          }
-        },
-        _ => false,
+  match (left.at(index), right.at(index)) {
+    (some(left_segment), some(right_segment)) => {
+      if route_segment_is_catch_all(left_segment) or route_segment_is_catch_all(right_segment) {
+        true
+      } else if route_segments_overlap(left_segment, right_segment) {
+        route_patterns_overlap(left, right, index + 1)
+      } else {
+        false
       }
     },
-    _ => right.at(index).is_none(),
+    (none, none) => true,
+    _ => false,
   }
 }
 
 private fn route_segments_overlap(left: RouteSegment, right: RouteSegment) Bool {
-  let left_is_param = left.name.is_some()
-  let right_is_param = right.name.is_some()
-  if left_is_param and right_is_param {
-    true
-  } else if left_is_param {
-    right.value != ""
-  } else if right_is_param {
-    left.value != ""
-  } else {
-    left.value == right.value
+  match (left.name.is_some(), right.name.is_some()) {
+    (true, true) => true,
+    (true, false) => right.value != "",
+    (false, true) => left.value != "",
+    (false, false) => left.value == right.value,
   }
 }
 
