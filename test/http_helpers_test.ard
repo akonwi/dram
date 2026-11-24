@@ -1,0 +1,495 @@
+use ard/testing
+
+use dram/dram
+use go:net/http
+use go:net/http/httptest
+use go:strings
+use go:time
+
+fn serve(handler: http::Handler, method: Str, target: Str, headers: [Str: Str]) &mut httptest::ResponseRecorder {
+  let recorder = httptest::NewRecorder()
+  let request = httptest::NewRequest(method, target, strings::NewReader(""))
+  for name in headers.keys() {
+    request.Header.Set(name, headers.get(name).or(""))
+  }
+  handler.ServeHTTP(recorder, request)
+  recorder
+}
+
+fn with_cookies(lines: [Str]) dram::Request {
+  let request = &mut dram::Request::new("GET", "/")
+  for line in lines {
+    request.headers.add("Cookie", line)
+  }
+  request.*
+}
+
+fn set_cookies(response: dram::Response) [Str] {
+  response.headers.values("Set-Cookie")
+}
+
+// Cookies
+
+test fn request_cookie_reads_first_match_across_headers() Void!Str {
+  let request = with_cookies(["theme=dark; session=abc123", "session=later; lang=en"])
+  try testing::assert(request.cookie("session").or("") == "abc123", "first session cookie not returned")
+  try testing::assert(request.cookie("lang").or("") == "en", "cookie on second header not found")
+  try testing::assert(request.cookie("missing").is_none(), "missing cookie was found")
+  try testing::assert(request.cookie("").is_none(), "empty name matched")
+  try testing::assert(dram::Request::new("GET", "/").cookie("session").is_none(), "cookie without header")
+  testing::pass()
+}
+
+test fn request_cookie_tolerates_malformed_pairs_and_quotes() Void!Str {
+  let request = with_cookies(["bad name=1; good=yes; quoted=\"q v\"; empty="])
+  try testing::assert(request.cookie("good").or("") == "yes", "malformed pair hid a valid cookie")
+  try testing::assert(request.cookie("empty").or("x") == "", "empty value not present")
+  let all = request.cookies()
+  try testing::assert(all.get("good").or("") == "yes", "cookies() missing good")
+  try testing::assert(all.has("empty"), "cookies() missing empty")
+  try testing::assert(not all.has("bad name"), "cookies() included malformed name")
+  testing::pass()
+}
+
+test fn request_cookies_first_value_wins() Void!Str {
+  let all = with_cookies(["a=1; b=2", "a=3"]).cookies()
+  try testing::assert(all.size() == 2, "unexpected cookie count {all.size()}")
+  try testing::assert(all.get("a").or("") == "1", "first value did not win")
+  try testing::assert(all.get("b").or("") == "2", "b missing")
+  testing::pass()
+}
+
+test fn set_cookie_uses_safe_defaults() Void!Str {
+  let response = &mut dram::Response::new()
+  response.set_cookie("session", "abc123")
+  let lines = set_cookies(response.*)
+  try testing::assert(lines.size() == 1, "expected one Set-Cookie")
+  try testing::assert(
+    lines.at(0).or("") == "session=abc123; Path=/; HttpOnly; SameSite=Lax",
+    "unexpected defaults: {lines.at(0).or("")}",
+  )
+  testing::pass()
+}
+
+test fn set_cookie_applies_options() Void!Str {
+  let response = &mut dram::Response::new()
+  response.set_cookie(
+    "prefs",
+    "v1",
+    max_age: 3600,
+    expires: time::Date(2030, time::January, 2, 3, 4, 5, 0, time::UTC),
+    path: "/app",
+    domain: "example.com",
+    secure: true,
+    http_only: false,
+    same_site: dram::SameSite::strict,
+  )
+  response.set_cookie("cross", "1", secure: true, same_site: dram::SameSite::none)
+  let lines = set_cookies(response.*)
+  try testing::assert(lines.size() == 2, "Set-Cookie headers did not coexist")
+  try testing::assert(
+    lines.at(0).or("") == "prefs=v1; Path=/app; Domain=example.com; Expires=Wed, 02 Jan 2030 03:04:05 GMT; Max-Age=3600; Secure; SameSite=Strict",
+    "unexpected options: {lines.at(0).or("")}",
+  )
+  try testing::assert(
+    lines.at(1).or("") == "cross=1; Path=/; HttpOnly; Secure; SameSite=None",
+    "unexpected SameSite=None cookie: {lines.at(1).or("")}",
+  )
+  testing::pass()
+}
+
+test fn set_cookie_allows_prefixed_names_when_rules_hold() Void!Str {
+  let response = &mut dram::Response::new()
+  response.set_cookie("__Host-session", "x", secure: true)
+  response.set_cookie("__Secure-id", "y", secure: true, domain: "example.com", path: "/a")
+  try testing::assert(set_cookies(response.*).size() == 2, "prefixed cookies rejected")
+  testing::pass()
+}
+
+test fn set_cookie_rejects_invalid_input() Void!Str {
+  let response = &mut dram::Response::new()
+  let bad_name = unsafe {
+    response.set_cookie("bad name", "v")
+  }
+  try testing::assert(bad_name.is_err(), "space in name accepted")
+  let semicolon_name = unsafe {
+    response.set_cookie("a;b", "v")
+  }
+  try testing::assert(semicolon_name.is_err(), "semicolon in name accepted")
+  let empty_name = unsafe {
+    response.set_cookie("", "v")
+  }
+  try testing::assert(empty_name.is_err(), "empty name accepted")
+  for value in ["a b", "a,b", "a;b", "a\"b", "a\\b", "a\nb", "café"] {
+    let invalid = unsafe {
+      response.set_cookie("v", value)
+    }
+    try testing::assert(invalid.is_err(), "invalid value accepted: {value}")
+  }
+  let zero_age = unsafe {
+    response.set_cookie("v", "1", max_age: 0)
+  }
+  try testing::assert(zero_age.is_err(), "max_age 0 accepted")
+  let negative_age = unsafe {
+    response.set_cookie("v", "1", max_age: -5)
+  }
+  try testing::assert(negative_age.is_err(), "negative max_age accepted")
+  let none_insecure = unsafe {
+    response.set_cookie("v", "1", same_site: dram::SameSite::none)
+  }
+  try testing::assert(none_insecure.is_err(), "SameSite=None without Secure accepted")
+  let secure_prefix = unsafe {
+    response.set_cookie("__Secure-v", "1")
+  }
+  try testing::assert(secure_prefix.is_err(), "__Secure- without Secure accepted")
+  let host_domain = unsafe {
+    response.set_cookie("__Host-v", "1", secure: true, domain: "example.com")
+  }
+  try testing::assert(host_domain.is_err(), "__Host- with Domain accepted")
+  let host_path = unsafe {
+    response.set_cookie("__Host-v", "1", secure: true, path: "/a")
+  }
+  try testing::assert(host_path.is_err(), "__Host- with non-root path accepted")
+  let relative_path = unsafe {
+    response.set_cookie("v", "1", path: "app")
+  }
+  try testing::assert(relative_path.is_err(), "relative path accepted")
+  let injected_path = unsafe {
+    response.set_cookie("v", "1", path: "/a; Domain=evil")
+  }
+  try testing::assert(injected_path.is_err(), "path with ';' accepted")
+  let bad_domain = unsafe {
+    response.set_cookie("v", "1", domain: "bad domain")
+  }
+  try testing::assert(bad_domain.is_err(), "invalid domain accepted")
+  try testing::assert(set_cookies(response.*).size() == 0, "rejected cookie was still added")
+  testing::pass()
+}
+
+test fn clear_cookie_expires_the_cookie() Void!Str {
+  let response = &mut dram::Response::new()
+  response.clear_cookie("session")
+  response.clear_cookie("scoped", path: "/app", domain: "example.com")
+  response.clear_cookie("__Host-session")
+  let lines = set_cookies(response.*)
+  try testing::assert(
+    lines.at(0).or("") == "session=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; HttpOnly; SameSite=Lax",
+    "unexpected clear: {lines.at(0).or("")}",
+  )
+  try testing::assert(
+    lines.at(1).or("") == "scoped=; Path=/app; Domain=example.com; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; HttpOnly; SameSite=Lax",
+    "unexpected scoped clear: {lines.at(1).or("")}",
+  )
+  try testing::assert(strings::Contains(lines.at(2).or(""), "; Secure"), "prefixed clear lacks Secure")
+  testing::pass()
+}
+
+test fn cookies_survive_redirects_and_reach_the_wire() Void!Str {
+  let app = &mut dram::App::new()
+  app.post("/login", fn(request, response) {
+    response.set_cookie("session", "abc", max_age: 60)
+    response.set_cookie("theme", "dark")
+    response.redirect("/")
+  })
+  app.get("/whoami", fn(request, response) {
+    response.text(200, request.cookie("session").or("nobody"))
+  })
+  let login = serve(app.*, "POST", "/login", [:])
+  try testing::assert(login.Code == 303, "login status {login.Code}")
+  try testing::assert(login.Header().Values("Set-Cookie").size() == 2, "Set-Cookie headers lost")
+  try testing::assert(login.Header().Get("Location") == "/", "Location missing")
+  let me = serve(app.*, "GET", "/whoami", ["Cookie": "session=abc; theme=dark"])
+  try testing::assert(me.Body.String() == "abc", "cookie not read over HTTP: {me.Body.String()}")
+  testing::pass()
+}
+
+// Redirects
+
+test fn redirect_defaults_to_303_with_empty_body() Void!Str {
+  let response = &mut dram::Response::new()
+  response.text(200, "replaced")
+  response.redirect("/done?ok=1")
+  try testing::assert(response.status == 303, "default status {response.status}")
+  try testing::assert(response.headers.get("Location").or("") == "/done?ok=1", "Location not set")
+  try testing::assert(response.body.size() == 0, "redirect has a body")
+  testing::pass()
+}
+
+test fn redirect_accepts_only_redirect_statuses() Void!Str {
+  for code in [301, 302, 303, 307, 308] {
+    let response = &mut dram::Response::new()
+    response.redirect("/x", status: code)
+    try testing::assert(response.status == code, "status {code} not applied")
+  }
+  for code in [200, 300, 304, 305, 306, 404] {
+    let response = &mut dram::Response::new()
+    let rejected = unsafe {
+      response.redirect("/x", status: code)
+    }
+    try testing::assert(rejected.is_err(), "status {code} accepted")
+  }
+  testing::pass()
+}
+
+test fn redirect_refuses_off_site_targets_unless_external() Void!Str {
+  let response = &mut dram::Response::new()
+  for target in [
+    "https://evil.example/",
+    "//evil.example",
+    "/\\evil.example",
+    "\\\\evil.example",
+    "/\t/evil.example",
+    "evil.example",
+    "javascript:alert(1)",
+    "",
+  ] {
+    let refused = unsafe {
+      response.redirect(target)
+    }
+    try testing::assert(refused.is_err(), "off-site redirect accepted: {target}")
+  }
+  response.redirect("https://accounts.example/oauth?x=1", external: true)
+  try testing::assert(
+    response.headers.get("Location").or("") == "https://accounts.example/oauth?x=1",
+    "external redirect not applied",
+  )
+  let injected = unsafe {
+    response.redirect("https://ok.example/\r\nSet-Cookie: x=1", external: true)
+  }
+  try testing::assert(injected.is_err(), "external redirect allowed CRLF")
+  let empty = unsafe {
+    response.redirect("", external: true)
+  }
+  try testing::assert(empty.is_err(), "empty external redirect accepted")
+  testing::pass()
+}
+
+test fn redirects_are_never_compressed() Void!Str {
+  let app = &mut dram::App::new()
+  app.compress(min_bytes: 0)
+  app.post("/login", fn(request, response) {
+    response.redirect("/")
+  })
+  let redirected = serve(app.*, "POST", "/login", ["Accept-Encoding": "gzip"])
+  try testing::assert(redirected.Code == 303, "status {redirected.Code}")
+  try testing::assert(redirected.Body.Len() == 0, "redirect gained a body")
+  try testing::assert(redirected.Header().Get("Content-Encoding") == "", "empty body was gzipped")
+  testing::pass()
+}
+
+test fn redirect_on_head_has_no_body_over_http() Void!Str {
+  let app = &mut dram::App::new()
+  app.get("/old", fn(request, response) {
+    response.redirect("/new", status: 308)
+  })
+  let head = serve(app.*, "HEAD", "/old", [:])
+  try testing::assert(head.Code == 308 and head.Body.Len() == 0, "HEAD redirect wrong")
+  try testing::assert(head.Header().Get("Location") == "/new", "HEAD Location missing")
+  testing::pass()
+}
+
+test fn local_path_accepts_only_same_origin_paths() Void!Str {
+  for target in ["/", "/settings", "/a/b?next=//x#frag", "/café"] {
+    try testing::assert(dram::local_path(target).or("") == target, "local path rejected: {target}")
+  }
+  for target in [
+    "",
+    "settings",
+    "./x",
+    "?q=1",
+    "#top",
+    "//evil.example",
+    "/\\evil.example",
+    "/a\\b",
+    "/\t/evil.example",
+    "/\n/evil.example",
+    " /x",
+    "https://evil.example",
+    "javascript:alert(1)",
+  ] {
+    try testing::assert(dram::local_path(target).is_none(), "non-local path accepted: {target}")
+  }
+  testing::pass()
+}
+
+// Security headers
+
+fn secured_app(middleware: dram::Middleware) &mut dram::App {
+  let app = &mut dram::App::new()
+  app.use(middleware)
+  app.get("/", fn(request, response) {
+    response.text(200, "home")
+  })
+  app.get("/own", fn(request, response) {
+    response.headers.set("X-Frame-Options", "DENY")
+    response.headers.set("Content-Security-Policy", "default-src 'none'")
+    response.headers.set("Referrer-Policy", "no-referrer")
+    response.text(200, "own")
+  })
+  app
+}
+
+test fn security_headers_defaults() Void!Str {
+  let app = secured_app(dram::security_headers())
+  let response = app.handle(dram::Request::new("GET", "/"))
+  try testing::assert(
+    response.headers.get("X-Content-Type-Options").or("") == "nosniff",
+    "nosniff missing",
+  )
+  try testing::assert(response.headers.get("X-Frame-Options").or("") == "SAMEORIGIN", "XFO missing")
+  try testing::assert(
+    response.headers.get("Content-Security-Policy").or("") == "frame-ancestors 'self'",
+    "frame-ancestors missing",
+  )
+  try testing::assert(
+    response.headers.get("Referrer-Policy").or("") == "strict-origin-when-cross-origin",
+    "Referrer-Policy missing",
+  )
+  try testing::assert(response.headers.get("Strict-Transport-Security").is_none(), "HSTS sent by default")
+  let missing = app.handle(dram::Request::new("GET", "/missing"))
+  try testing::assert(missing.status == 404, "fallback status")
+  try testing::assert(missing.headers.get("X-Frame-Options").is_some(), "fallback lacks headers")
+  testing::pass()
+}
+
+test fn security_headers_keep_handler_values() Void!Str {
+  let response = secured_app(dram::security_headers()).handle(dram::Request::new("GET", "/own"))
+  try testing::assert(response.headers.values("X-Frame-Options").size() == 1, "XFO duplicated")
+  try testing::assert(response.headers.get("X-Frame-Options").or("") == "DENY", "handler XFO clobbered")
+  try testing::assert(
+    response.headers.get("Content-Security-Policy").or("") == "default-src 'none'",
+    "handler CSP clobbered",
+  )
+  try testing::assert(
+    response.headers.get("Referrer-Policy").or("") == "no-referrer",
+    "handler referrer clobbered",
+  )
+  try testing::assert(
+    response.headers.get("X-Content-Type-Options").or("") == "nosniff",
+    "nosniff not filled",
+  )
+  testing::pass()
+}
+
+test fn security_headers_options() Void!Str {
+  let strict = secured_app(
+    dram::security_headers(
+      frame: dram::Framing::deny,
+      referrer_policy: "no-referrer",
+      csp: "default-src 'self'; img-src *;",
+      hsts_max_age: 31536000,
+      hsts_include_subdomains: true,
+    ),
+  ).handle(dram::Request::new("GET", "/"))
+  try testing::assert(strict.headers.get("X-Frame-Options").or("") == "DENY", "deny XFO")
+  try testing::assert(
+    strict.headers.get("Content-Security-Policy").or("") == "default-src 'self'; img-src *; frame-ancestors 'none'",
+    "CSP: {strict.headers.get("Content-Security-Policy").or("")}",
+  )
+  try testing::assert(strict.headers.get("Referrer-Policy").or("") == "no-referrer", "referrer option")
+  try testing::assert(
+    strict.headers.get("Strict-Transport-Security").or("") == "max-age=31536000; includeSubDomains",
+    "HSTS option",
+  )
+
+  let own_ancestors = secured_app(
+    dram::security_headers(csp: "default-src 'self'; Frame-Ancestors https://a.example"),
+  ).handle(dram::Request::new("GET", "/"))
+  try testing::assert(
+    own_ancestors.headers.get("Content-Security-Policy").or("") == "default-src 'self'; Frame-Ancestors https://a.example",
+    "CSP frame-ancestors overridden",
+  )
+
+  let open = secured_app(
+    dram::security_headers(frame: dram::Framing::allow, referrer_policy: "", hsts_max_age: 0),
+  ).handle(dram::Request::new("GET", "/"))
+  try testing::assert(open.headers.get("X-Frame-Options").is_none(), "allow sent XFO")
+  try testing::assert(open.headers.get("Content-Security-Policy").is_none(), "allow sent CSP")
+  try testing::assert(open.headers.get("Referrer-Policy").is_none(), "empty referrer sent")
+  try testing::assert(
+    open.headers.get("Strict-Transport-Security").or("") == "max-age=0",
+    "HSTS max-age=0",
+  )
+  try testing::assert(open.headers.get("X-Content-Type-Options").or("") == "nosniff", "nosniff always")
+
+  let negative = unsafe {
+    dram::security_headers(hsts_max_age: -1)
+  }
+  try testing::assert(negative.is_err(), "negative HSTS accepted")
+  let bad_referrer = unsafe {
+    dram::security_headers(referrer_policy: "a\nb")
+  }
+  try testing::assert(bad_referrer.is_err(), "CRLF referrer accepted")
+  testing::pass()
+}
+
+test fn security_headers_cover_short_circuits_and_groups() Void!Str {
+  let app = &mut dram::App::new()
+  app.use(dram::security_headers())
+  app.use(fn(request, response, next) {
+    if request.path == "/blocked" {
+      response.text(401, "no")
+    } else {
+      next.run(request, response)
+    }
+  })
+  let embed = &mut app.group("/embed")
+  embed.use(dram::security_headers(frame: dram::Framing::allow))
+  embed.get("/widget", fn(request, response) {
+    response.text(200, "widget")
+  })
+  let blocked = app.handle(dram::Request::new("GET", "/blocked"))
+  try testing::assert(
+    blocked.status == 401 and blocked.headers.get("X-Frame-Options").is_some(),
+    "short-circuit lacks headers",
+  )
+  // The group's policy runs inside the global one and decides the response.
+  let widget = app.handle(dram::Request::new("GET", "/embed/widget"))
+  try testing::assert(widget.headers.get("X-Content-Type-Options").is_some(), "group nosniff")
+  try testing::assert(widget.headers.get("X-Frame-Options").is_none(), "global policy re-added XFO")
+  try testing::assert(
+    widget.headers.get("Content-Security-Policy").is_none(),
+    "global policy re-added CSP",
+  )
+  try testing::assert(widget.headers.get("Referrer-Policy").is_some(), "group referrer missing")
+  let missing = app.handle(dram::Request::new("GET", "/embed/missing"))
+  try testing::assert(
+    missing.headers.get("X-Frame-Options").or("") == "SAMEORIGIN",
+    "global policy skipped",
+  )
+  testing::pass()
+}
+
+test fn security_headers_apply_to_sse_and_negotiated_responses() Void!Str {
+  let app = &mut dram::App::new()
+  app.use(dram::security_headers(hsts_max_age: 60))
+  app.compress(min_bytes: 1)
+  app.get("/events", fn(request, response) {
+    response.sse(fn(events) {
+      events.send(data: "hi")
+    })
+  })
+  app.get("/page", fn(request, response) {
+    response.headers.set("ETag", "\"v1\"")
+    response.text(200, strings::Repeat("page ", 50))
+  })
+
+  let events = serve(app.*, "GET", "/events", [:])
+  try testing::assert(events.Header().Get("Content-Type") == "text/event-stream", "not an event stream")
+  try testing::assert(events.Header().Get("X-Frame-Options") == "SAMEORIGIN", "SSE lacks XFO")
+  try testing::assert(
+    events.Header().Values("X-Content-Type-Options").size() == 1,
+    "SSE nosniff duplicated",
+  )
+  try testing::assert(events.Header().Get("Strict-Transport-Security") == "max-age=60", "SSE lacks HSTS")
+  try testing::assert(strings::Contains(events.Body.String(), "data: hi"), "SSE body")
+
+  let gzipped = serve(app.*, "GET", "/page", ["Accept-Encoding": "gzip"])
+  try testing::assert(gzipped.Header().Get("Content-Encoding") == "gzip", "not compressed")
+  try testing::assert(gzipped.Header().Get("Referrer-Policy") != "", "gzip lacks headers")
+
+  let cached = serve(app.*, "GET", "/page", ["If-None-Match": "\"v1\""])
+  try testing::assert(cached.Code == 304, "not a 304: {cached.Code}")
+  try testing::assert(cached.Header().Get("X-Frame-Options") == "SAMEORIGIN", "304 lacks headers")
+  testing::pass()
+}

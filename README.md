@@ -12,6 +12,7 @@ The package root provides Dram's HTTP foundation:
 - static, `:name`, and final-segment `*name` routes, nested route groups, and customizable 404/405 responses;
 - in-memory `App.handle(Request)` dispatch;
 - buffered text and byte responses plus deferred server-sent event streams;
+- cookie reading and writing with safe defaults, local-by-default redirects, and opt-in security headers;
 - automatic conditional `GET` (304) for responses with an `ETag`, and opt-in gzip compression;
 - case-insensitive, multi-value headers;
 - bounded request bodies with a 1 MiB default;
@@ -220,6 +221,63 @@ let independent = response.headers.clone()
 `get` returns the first value as `Str?`, `values` returns an independent list of every value, and `clone` creates an independent header map. Header names are case-insensitive and their iteration order is unspecified.
 
 `response.bytes` uses `application/octet-stream`; use `response.data(status, content_type, bytes)` for an explicit media type. `response.json(status, value)` buffers compact JSON with `application/json; charset=utf-8`. Encoding completes before the response changes; unsupported values panic and are replaced by the recovery boundary's generic 500 response. Pre-encoded JSON should use `response.data` to avoid encoding it as a JSON string.
+
+### Cookies
+
+`request.cookie(name)` returns the first cookie with that name as `Str?`. `request.cookies()` returns every cookie as `[Str: Str]`; when a name repeats, the first value wins.
+
+`response.set_cookie(name, value, ...)` adds a `Set-Cookie` header with `Path=/`, `HttpOnly`, and `SameSite=Lax` unless told otherwise. Each call adds a header, so several cookies coexist. `clear_cookie(name, path?, domain?)` removes one; pass the path and domain it was set with.
+
+```ard
+response.set_cookie(
+  "session",
+  token,
+  max_age: 86_400,  // seconds; or expires: a time::Time
+  secure: true,     // HTTPS only; off by default so plain-http dev works
+)
+response.set_cookie("theme", "dark", http_only: false, same_site: dram::SameSite::strict)
+response.clear_cookie("session")
+```
+
+Other options are `path`, `domain`, and `same_site` (`lax`, `strict`, or `none`). `secure` defaults to false; set it in production. Invalid input panics, like invalid header values: names must be HTTP tokens, values printable ASCII without spaces, `"`, `,`, `;`, or `\` (encode arbitrary data as hex or base64), and `max_age` positive. `SameSite=None` and `__Secure-`/`__Host-` names require `secure: true`, and `__Host-` names require path `/` and no domain.
+
+### Redirects
+
+`response.redirect(location, status?)` replaces the response with an empty-bodied redirect, keeping headers such as `Set-Cookie`. The status defaults to 303 See Other, the right answer after a form `POST`, and must be 301, 302, 303, 307, or 308.
+
+Redirects stay on the site unless marked otherwise. `location` must be a same-origin absolute path such as `/settings?tab=2`, or `redirect` panics; pass `external: true` to leave the site. Validate targets that come from the request with `dram::local_path(target) Str?`, which rejects `//host`, `/\host`, schemes, backslashes, and control characters:
+
+```ard
+app.post("/login", fn(request, response) {
+  // ...check credentials, then:
+  response.set_cookie("session", token, secure: true)
+  response.redirect(request.query("next").and_then(dram::local_path).or("/"))
+})
+
+response.redirect("https://accounts.example.com/oauth", status: 302, external: true)
+```
+
+### Security headers
+
+`dram::security_headers()` is opt-in middleware for defensive headers. Register it first: it runs the rest of the chain, then adds each header only if the response doesn't already have one, so handlers can override any of them.
+
+```ard
+app.use(dram::security_headers())
+// X-Content-Type-Options: nosniff
+// X-Frame-Options: SAMEORIGIN
+// Content-Security-Policy: frame-ancestors 'self'
+// Referrer-Policy: strict-origin-when-cross-origin
+
+app.use(dram::security_headers(
+  frame: dram::Framing::deny,                // DENY / frame-ancestors 'none'; Framing::allow sends neither
+  csp: "default-src 'self'",                 // frame-ancestors appended unless present
+  referrer_policy: "no-referrer",            // "" omits the header
+  hsts_max_age: 31_536_000,                  // off by default; only meaningful over HTTPS
+  hsts_include_subdomains: true,
+))
+```
+
+Groups can use a different policy, for example `Framing::allow` for embeddable pages. When several apply to a request, the innermost decides and outer ones add nothing. The headers also apply to event streams, gzip responses, and 304s. They are not added to the 400 and 413 responses Dram returns before dispatch, or to the generic 500 after a panic.
 
 ### Conditional requests and compression
 

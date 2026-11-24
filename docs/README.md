@@ -33,3 +33,4 @@ Common statuses are `Proposed`, `Accepted`, `Superseded`, and `Deprecated`. When
 - [0004: Define Response Delivery and Commitment](./adrs/0004-define-response-delivery-and-commitment.md)
 - [0005: Add a Server Lifecycle and Observers](./adrs/0005-add-server-lifecycle-and-observers.md)
 - [0006: Negotiate Representations at Delivery](./adrs/0006-negotiate-representations-at-delivery.md)
+- [0007: Add Cookie, Redirect, and Security Header Helpers](./adrs/0007-add-cookie-redirect-and-security-header-helpers.md)

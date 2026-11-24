@@ -12,7 +12,7 @@ This checklist collects the planned and incomplete work described by the accepte
 
 ## Buffered response helpers
 
-- [ ] Add a redirect response helper.
+- [x] Add a redirect response helper.
 
 ## Headers
 

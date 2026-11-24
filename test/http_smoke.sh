@@ -26,6 +26,20 @@ done
 [[ "$code" == "200" ]]
 [[ "$(cat "$body")" == "Hello from Dram" ]]
 [[ "$(grep -ci '^Set-Cookie:' "$headers")" == "2" ]]
+grep -qi '^Set-Cookie: first=1; Path=/; HttpOnly; SameSite=Lax' "$headers"
+grep -qi '^X-Content-Type-Options: nosniff' "$headers"
+grep -qi '^X-Frame-Options: SAMEORIGIN' "$headers"
+
+code="$(curl -sS -o "$body" -w '%{http_code}' -H 'Cookie: first=abc' http://127.0.0.1:8080/cookie)"
+[[ "$code" == "200" ]]
+[[ "$(cat "$body")" == "abc" ]]
+
+code="$(curl -sS -D "$headers" -o "$body" -w '%{http_code}' -X POST 'http://127.0.0.1:8080/go?next=/search%3Fq%3Dok')"
+[[ "$code" == "303" ]]
+grep -qi '^Location: /search?q=ok' "$headers"
+code="$(curl -sS -D "$headers" -o "$body" -w '%{http_code}' -X POST 'http://127.0.0.1:8080/go?next=//evil.example')"
+[[ "$code" == "303" ]]
+[[ "$(grep -i '^Location:' "$headers" | tr -d '\r')" == "Location: /" ]]
 
 head_size="$(curl -sS -I -o /dev/null -w '%{size_download}' http://127.0.0.1:8080/)"
 [[ "$head_size" == "0" ]]

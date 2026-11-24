@@ -11,10 +11,20 @@ fn main() {
     response.headers.set("X-Powered-By", "Dram")
     next.run(request, response)
   })
+  app.use(dram::security_headers())
   app.get("/", fn(request, response) {
-    response.headers.add("Set-Cookie", "first=1; HttpOnly; SameSite=Lax")
-    response.headers.add("Set-Cookie", "second=2; HttpOnly; SameSite=Lax")
+    response.set_cookie("first", "1")
+    response.set_cookie("second", "2", max_age: 3600)
     response.text(200, "Hello from Dram")
+  })
+
+  app.get("/cookie", fn(request, response) {
+    response.text(200, request.cookie("first").or("none"))
+  })
+
+  app.post("/go", fn(request, response) {
+    let target = request.query("next").and_then(dram::local_path).or("/")
+    response.redirect(target)
   })
 
   app.get("/hello/:name", fn(request, response) {

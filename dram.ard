@@ -115,6 +115,29 @@ impl Request {
     parse_query_values(self.raw_query, name)
   }
 
+  // The first cookie named `name`, parsed leniently like Go's
+  // `Request.Cookie`: a malformed pair does not hide the others.
+  fn cookie(name: Str) Str? {
+    let raw = &mut http::Request{Header: self.headers._raw}
+    match raw.Cookie(name) {
+      ok(found) => Maybe::new(found.Value),
+      err(_) => Maybe::new(),
+    }
+  }
+
+  // Every request cookie by name. For a repeated name the first wins,
+  // matching `cookie(name)`.
+  fn cookies() [Str: Str] {
+    let raw = &mut http::Request{Header: self.headers._raw}
+    let found: &mut [Str: Str] = &mut [:]
+    for parsed in raw.Cookies() {
+      if not found.has(parsed.Name) {
+        found.set(parsed.Name, parsed.Value)
+      }
+    }
+    found.*
+  }
+
   fn with_context(context: go_context::Context) Request {
     Request{
       method: self.method,
@@ -235,6 +258,9 @@ private struct ResponseState {
   mode: ResponseMode,
   sse_handler: SSEHandler?,
   context: go_context::Context?,
+  // Set by the innermost `security_headers`, so outer instances leave
+  // the response to the more specific policy.
+  secured: Bool?,
 }
 
 struct Response {
@@ -280,6 +306,77 @@ impl Response {
     }
   }
 
+  // Add a `Set-Cookie` header. Defaults: `Path=/`, `HttpOnly`,
+  // `SameSite=Lax`, not `Secure`, and a browser-session lifetime. Each call
+  // adds a header, so several cookies coexist. Invalid names, values, or
+  // attribute combinations panic.
+  fn mut set_cookie(
+    name: Str,
+    value: Str,
+    max_age: Int?,
+    expires: time::Time?,
+    path: Str?,
+    domain: Str?,
+    secure: Bool?,
+    http_only: Bool?,
+    same_site: SameSite?,
+  ) {
+    let seconds = max_age.or(0)
+    if max_age.is_some() and seconds <= 0 {
+      panic("cookie {name}: max_age must be positive; use clear_cookie to remove a cookie")
+    }
+    add_cookie(
+      self,
+      name,
+      value,
+      seconds,
+      expires.or(time::Time{}),
+      path.or("/"),
+      domain.or(""),
+      secure.or(false),
+      http_only.or(true),
+      same_site.or(SameSite::lax),
+    )
+  }
+
+  // Add a `Set-Cookie` header that removes `name`. `path` and `domain` must
+  // match the ones the cookie was set with. `__Secure-` and `__Host-`
+  // cookies are cleared with `Secure`, as browsers require.
+  fn mut clear_cookie(name: Str, path: Str?, domain: Str?) {
+    add_cookie(
+      self,
+      name,
+      "",
+      -1,
+      time::Unix(Int64::from(0), Int64::from(0)),
+      path.or("/"),
+      domain.or(""),
+      has_secure_cookie_prefix(name),
+      true,
+      SameSite::lax,
+    )
+  }
+
+  // Replace the response with an empty-bodied redirect. `status` defaults
+  // to 303 and must be 301, 302, 303, 307, or 308. `location` must be a
+  // same-origin path (see `local_path`) unless `external` is true.
+  fn mut redirect(location: Str, status: Int?, external: Bool?) {
+    let code = status.or(303)
+    if code != 301 and code != 302 and code != 303 and code != 307 and code != 308 {
+      panic("redirect status must be 301, 302, 303, 307, or 308: {code}")
+    }
+    if location == "" or has_control_character(location) {
+      panic("invalid redirect location: {strconv::Quote(location)}")
+    }
+    if (not external.or(false)) and local_path(location).is_none() {
+      panic(
+        "redirect location is not a local path; pass external: true to leave the site: {strconv::Quote(location)}",
+      )
+    }
+    self.text(code, "")
+    self.headers.set("Location", location)
+  }
+
   fn mut sse(handler: SSEHandler) {
     let state = response_state(self.*)
     state.mode = ResponseMode::SSE
@@ -290,6 +387,191 @@ impl Response {
     self.headers.set("X-Content-Type-Options", "nosniff")
     self.body = []
   }
+}
+
+// The `SameSite` attribute of a cookie. `none` requires `secure: true`.
+enum SameSite {
+  lax,
+  strict,
+  none,
+}
+
+private fn add_cookie(
+  response: &mut Response,
+  name: Str,
+  value: Str,
+  max_age: Int,
+  expires: time::Time,
+  path: Str,
+  domain: Str,
+  secure: Bool,
+  http_only: Bool,
+  same_site: SameSite,
+) {
+  if not valid_token(name) {
+    panic("invalid cookie name: {strconv::Quote(name)}")
+  }
+  // RFC 6265 cookie-octets: printable ASCII except space, '"', ',', ';',
+  // and '\', so values never need quoting.
+  for character in value.runes() {
+    if character <= ' ' or character >= '\x7f' or strings::Contains("\",;\\", character.to_str()) {
+      panic("invalid character in value of cookie {name}; encode the value (e.g. hex or base64)")
+    }
+  }
+  if (not strings::HasPrefix(path, "/")) or strings::Contains(path, ";") or has_control_character(path) {
+    panic("cookie {name}: path must start with '/' and contain no ';' or control characters")
+  }
+  if same_site == SameSite::none and not secure {
+    panic("cookie {name}: SameSite=None requires secure: true")
+  }
+  if has_secure_cookie_prefix(name) and not secure {
+    panic("cookie {name}: __Secure- and __Host- cookies require secure: true")
+  }
+  if strings::HasPrefix(name, "__Host-") and (path != "/" or domain != "") {
+    panic("cookie {name}: __Host- cookies require path \"/\" and no domain")
+  }
+  let site = match same_site {
+    SameSite::lax => http::SameSiteLaxMode,
+    SameSite::strict => http::SameSiteStrictMode,
+    SameSite::none => http::SameSiteNoneMode,
+  }
+  let cookie = &mut http::Cookie{
+    Name: name,
+    Value: value,
+    Path: path,
+    Domain: domain,
+    Expires: expires,
+    MaxAge: max_age,
+    Secure: secure,
+    HttpOnly: http_only,
+    SameSite: site,
+  }
+  match cookie.Valid() {
+    ok => (),
+    err(problem) => panic("invalid cookie {name}: {problem.error()}"),
+  }
+  response.headers.add("Set-Cookie", cookie.String())
+}
+
+private fn has_secure_cookie_prefix(name: Str) Bool {
+  strings::HasPrefix(name, "__Secure-") or strings::HasPrefix(name, "__Host-")
+}
+
+private fn has_control_character(value: Str) Bool {
+  mut found = false
+  for character in value.runes() {
+    if character < ' ' or character == '\x7f' {
+      found = true
+    }
+  }
+  found
+}
+
+// `target` if it is a same-origin absolute path such as `/settings?tab=1`,
+// otherwise none. Rejects scheme-relative `//host`, `/\host`, backslashes,
+// and control characters, which browsers strip or treat as `/`. Use it to
+// check redirect targets taken from requests, e.g. `?next=`.
+fn local_path(target: Str) Str? {
+  let second = target.runes().at(1).or('a')
+  let local = strings::HasPrefix(target, "/") and second != '/' and (not strings::Contains(target, "\\")) and (not has_control_character(target))
+  if local {
+    Maybe::new(target)
+  } else {
+    Maybe::new()
+  }
+}
+
+// How `security_headers` restricts framing by other sites.
+enum Framing {
+  same_origin,
+  deny,
+  allow,
+}
+
+// Middleware that adds defensive response headers after the rest of the
+// chain runs, without replacing any header the response already has. When
+// several are registered (e.g. globally and on a group), the innermost one
+// that runs decides the response's policy and outer ones add nothing:
+//
+// - `X-Content-Type-Options: nosniff`;
+// - for `same_origin` (default) `X-Frame-Options: SAMEORIGIN` and
+//   `frame-ancestors 'self'`; for `deny`, `DENY` and `'none'`; `allow`
+//   sends neither;
+// - `Referrer-Policy`, default `strict-origin-when-cross-origin` ("" omits);
+// - `Content-Security-Policy`: `csp`, plus the frame-ancestors directive
+//   when `csp` has none, or just that directive without `csp`;
+// - `Strict-Transport-Security: max-age=N` only when `hsts_max_age` is set.
+fn security_headers(
+  frame: Framing?,
+  referrer_policy: Str?,
+  csp: Str?,
+  hsts_max_age: Int?,
+  hsts_include_subdomains: Bool?,
+) Middleware {
+  let framing = frame.or(Framing::same_origin)
+  let defaults = &mut Headers::new()
+  defaults.set("X-Content-Type-Options", "nosniff")
+  let ancestors = match framing {
+    Framing::same_origin => "frame-ancestors 'self'",
+    Framing::deny => "frame-ancestors 'none'",
+    Framing::allow => "",
+  }
+  match framing {
+    Framing::same_origin => defaults.set("X-Frame-Options", "SAMEORIGIN"),
+    Framing::deny => defaults.set("X-Frame-Options", "DENY"),
+    Framing::allow => (),
+  }
+  let policy = strings::TrimSpace(strings::TrimSuffix(strings::TrimSpace(csp.or("")), ";"))
+  if policy == "" {
+    if ancestors != "" {
+      defaults.set("Content-Security-Policy", ancestors)
+    }
+  } else if ancestors == "" or has_csp_directive(policy, "frame-ancestors") {
+    defaults.set("Content-Security-Policy", policy)
+  } else {
+    defaults.set("Content-Security-Policy", "{policy}; {ancestors}")
+  }
+  let referrer = referrer_policy.or("strict-origin-when-cross-origin")
+  if referrer != "" {
+    defaults.set("Referrer-Policy", referrer)
+  }
+  match hsts_max_age {
+    seconds => {
+      if seconds < 0 {
+        panic("hsts_max_age cannot be negative: {seconds}")
+      }
+      mut subdomains = ""
+      if hsts_include_subdomains.or(false) {
+        subdomains = "; includeSubDomains"
+      }
+      defaults.set("Strict-Transport-Security", "max-age={seconds}{subdomains}")
+    },
+    _ => (),
+  }
+  let fixed = defaults.clone()
+  fn(request: Request, response: &mut Response, next: Next) {
+    next.run(request, response)
+    let state = response_state(response.*)
+    if not state.secured.or(false) {
+      state.secured = Maybe::new(true)
+      for name in fixed.names() {
+        if response.headers.get(name).is_none() {
+          response.headers.set(name, fixed.get(name).or(""))
+        }
+      }
+    }
+  }
+}
+
+private fn has_csp_directive(policy: Str, name: Str) Bool {
+  mut found = false
+  for directive in strings::Split(policy, ";") {
+    let fields = strings::Fields(directive)
+    if strings::EqualFold(fields.at(0).or(""), name) {
+      found = true
+    }
+  }
+  found
 }
 
 private fn response_state(response: Response) &mut ResponseState {
@@ -1246,7 +1528,7 @@ private fn select_gzip(request: Request, response: &mut Response, settings: Comp
   let status = response.status
   let has_body = status >= 200 and status != 204 and status != 205 and status != 304 and status != 206
   let media = media_type(response.headers.get("Content-Type").or(""))
-  let eligible = has_body and response.body.size() >= settings.min_bytes and response.headers.get("Content-Encoding").is_none() and (not has_directive(response.headers.values("Cache-Control"), "no-transform")) and compressible(media, settings.types)
+  let eligible = has_body and response.body.size() > 0 and response.body.size() >= settings.min_bytes and response.headers.get("Content-Encoding").is_none() and (not has_directive(response.headers.values("Cache-Control"), "no-transform")) and compressible(media, settings.types)
   if eligible {
     let varies = has_directive(response.headers.values("Vary"), "Accept-Encoding") or has_directive(response.headers.values("Vary"), "*")
     if not varies {
