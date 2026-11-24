@@ -30,7 +30,7 @@ This checklist collects the planned and incomplete work described by the accepte
 - [ ] Open and validate files before commitment.
 - [ ] Delegate efficient transfer to Go HTTP facilities where practical.
 - [ ] Support range requests.
-- [ ] Support modification and conditional request checks.
+- [ ] Support modification and conditional request checks. (`If-None-Match` for buffered responses is done; `If-Modified-Since` remains.)
 - [ ] Produce correct content-length metadata.
 - [ ] Return 404 for missing files while the response is uncommitted.
 - [ ] Log unexpected file-access failures and return a generic 500 before commitment.

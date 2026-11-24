@@ -1,6 +1,8 @@
 use ard/async
 use ard/unsafe
 
+use go:bytes
+use go:compress/gzip
 use go:context as go_context
 use dram/context as request_context
 use go:encoding/json
@@ -22,6 +24,8 @@ use go:time
 let DEFAULT_MAX_BODY_BYTES = 1_048_576
 let DEFAULT_MAX_HEADER_BYTES = DEFAULT_MAX_BODY_BYTES
 let DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000
+let DEFAULT_COMPRESSION_MIN_BYTES = 1024
+let GZIP_CACHE_ENTRIES = 512
 
 private fn error_message(error: Error) Str {
   error.error()
@@ -159,14 +163,15 @@ struct Completion {
 
 type CompletionObserver = fn(Completion)
 
-private struct Observers {
+private struct ServeOptions {
   panic: PanicObserver?,
   complete: CompletionObserver?,
+  compression: Compression?,
 }
 
 // Report a recovered panic to the observer, or to stderr without one.
-private fn report_panic(observers: Observers, report: Panic) {
-  match observers.panic {
+private fn report_panic(options: ServeOptions, report: Panic) {
+  match options.panic {
     observer => observer(report),
     _ => {
       fmt::Fprintf(
@@ -488,6 +493,7 @@ struct App {
   _method_not_allowed_handler: Handler?,
   _panic_observer: PanicObserver?,
   _completion_observer: CompletionObserver?,
+  _compression: Any?,
 }
 
 private struct FallbackHandlers {
@@ -501,13 +507,17 @@ impl http::Handler for App {
       not_found: self._not_found_handler,
       method_not_allowed: self._method_not_allowed_handler,
     }
-    let observers = Observers{panic: self._panic_observer, complete: self._completion_observer}
+    let options = ServeOptions{
+      panic: self._panic_observer,
+      complete: self._completion_observer,
+      compression: compression_settings(self._compression),
+    }
     serve_observed(
       self.middleware_handlers,
       self.routes,
       fallback_handlers,
       self.max_body_bytes,
-      observers,
+      options,
       writer,
       raw_request,
     )
@@ -525,6 +535,7 @@ fn App::new() App {
     _method_not_allowed_handler: Maybe::new(),
     _panic_observer: Maybe::new(),
     _completion_observer: Maybe::new(),
+    _compression: Maybe::new(),
   }
 }
 
@@ -559,6 +570,28 @@ impl App {
   // delivered, e.g. to write access logs. Not called by `App.handle`.
   fn mut on_complete(observer: CompletionObserver) {
     self._completion_observer = Maybe::new(observer)
+  }
+
+  // Gzip buffered responses when the client accepts it. Applies after all
+  // middleware, at delivery, to responses with a body of at least
+  // `min_bytes` (default 1024) whose media type is in `types` (default:
+  // text/* except event streams, JSON, JavaScript, XML, SVG, WebAssembly,
+  // and +json/+xml types; `type/*` entries match a whole type). Skips
+  // responses that already have a Content-Encoding or whose Cache-Control
+  // has no-transform. Adds `Vary: Accept-Encoding` and gives the gzip
+  // representation its own ETag (`"tag"` becomes `"tag-gzip"`). Event
+  // streams are never compressed.
+  fn mut compress(min_bytes: Int?, types: [Str]?) {
+    if min_bytes.or(0) < 0 {
+      panic("compression min bytes cannot be negative")
+    }
+    self._compression = Maybe::new<Any>(
+      Compression{
+        min_bytes: min_bytes.or(DEFAULT_COMPRESSION_MIN_BYTES),
+        types: types,
+        cache: &mut GzipCache{lock: sync::Mutex{}, entries: [:]},
+      },
+    )
   }
 
   fn mut route(method: Str, path: Str, handler: Handler) {
@@ -616,7 +649,11 @@ impl App {
       self.routes,
       fallback_handlers,
       self.max_body_bytes,
-      Observers{panic: self._panic_observer, complete: Maybe::new()},
+      ServeOptions{
+        panic: self._panic_observer,
+        complete: Maybe::new(),
+        compression: compression_settings(self._compression),
+      },
       request,
     )
   }
@@ -709,6 +746,7 @@ private fn snapshot_app(app: App) App {
     _method_not_allowed_handler: app._method_not_allowed_handler,
     _panic_observer: app._panic_observer,
     _completion_observer: app._completion_observer,
+    _compression: app._compression,
   }
 }
 
@@ -1029,7 +1067,7 @@ private fn serve_observed(
   routes: [Route],
   fallback_handlers: FallbackHandlers,
   max_body_bytes: Int,
-  observers: Observers,
+  options: ServeOptions,
   writer: http::ResponseWriter,
   raw_request: &mut http::Request,
 ) {
@@ -1038,7 +1076,7 @@ private fn serve_observed(
   let method = raw_request.Method
   let path = raw_request.URL.Path
   defer {
-    match observers.complete {
+    match options.complete {
       observer => {
         observer(
           Completion{
@@ -1058,7 +1096,7 @@ private fn serve_observed(
     routes,
     fallback_handlers,
     max_body_bytes,
-    observers,
+    options,
     record,
     writer,
     raw_request,
@@ -1070,7 +1108,7 @@ private fn serve_http(
   routes: [Route],
   fallback_handlers: FallbackHandlers,
   max_body_bytes: Int,
-  observers: Observers,
+  options: ServeOptions,
   record: &mut DeliveryRecord,
   writer: http::ResponseWriter,
   raw_request: &mut http::Request,
@@ -1090,7 +1128,7 @@ private fn serve_http(
       raw_request.URL.Path,
       raw_request.Context(),
       finalize_response(raw_request.Method, payload_too_large()),
-      observers,
+      options,
       record,
     )
   } else {
@@ -1105,7 +1143,7 @@ private fn serve_http(
             raw_request.URL.Path,
             raw_request.Context(),
             finalize_response(raw_request.Method, payload_too_large()),
-            observers,
+            options,
             record,
           )
         } else {
@@ -1128,10 +1166,10 @@ private fn serve_http(
               routes,
               fallback_handlers,
               max_body_bytes,
-              observers,
+              options,
               request,
             ),
-            observers,
+            options,
             record,
           )
         }
@@ -1143,7 +1181,7 @@ private fn serve_http(
           raw_request.URL.Path,
           raw_request.Context(),
           finalize_response(raw_request.Method, bad_request()),
-          observers,
+          options,
           record,
         )
       },
@@ -1156,17 +1194,239 @@ private fn handle_bounded(
   routes: [Route],
   fallback_handlers: FallbackHandlers,
   max_body_bytes: Int,
-  observers: Observers,
+  options: ServeOptions,
   request: Request,
 ) Response {
   if request.body.size() > max_body_bytes {
     finalize_safely(request.method, payload_too_large())
   } else {
-    finalize_safely(
-      request.method,
-      handle_safely(middleware_handlers, routes, fallback_handlers, observers, request),
-    )
+    let response = handle_safely(middleware_handlers, routes, fallback_handlers, options, request)
+    match unsafe {
+      finalize_response(request.method, negotiate(request, response, options.compression))
+    } {
+      ok(finalized) => finalized,
+      err(_) => finalize_response(request.method, internal_server_error()),
+    }
   }
+}
+
+// Representation selection and conditional requests, after all middleware:
+// choose gzip or identity, then answer 304 when `If-None-Match` holds the
+// selected representation's ETag.
+private fn negotiate(request: Request, response: Response, compression: Compression?) Response {
+  mut response = response
+  let negotiated = &mut response
+  if response_state(response).mode == ResponseMode::Buffered {
+    let gzip = match compression {
+      settings => select_gzip(request, negotiated, settings),
+      _ => false,
+    }
+    let etag = negotiated.headers.get("ETag").or("")
+    if gzip and etag != "" {
+      negotiated.headers.set("ETag", gzip_etag(etag))
+    }
+    if not_modified(request, negotiated.*) {
+      negotiated.status = 304
+      negotiated.body = []
+    } else if gzip {
+      let settings = compression.expect("gzip selected without compression")
+      negotiated.body = settings.cache.compress(
+        negotiated.headers.get("ETag").or(""),
+        negotiated.body,
+      )
+      negotiated.headers.set("Content-Encoding", "gzip")
+    }
+  }
+  negotiated.*
+}
+
+// Whether to gzip this response for this request. Adds `Vary:
+// Accept-Encoding` to every response whose encoding depends on the client.
+private fn select_gzip(request: Request, response: &mut Response, settings: Compression) Bool {
+  let status = response.status
+  let has_body = status >= 200 and status != 204 and status != 205 and status != 304 and status != 206
+  let media = media_type(response.headers.get("Content-Type").or(""))
+  let eligible = has_body and response.body.size() >= settings.min_bytes and response.headers.get("Content-Encoding").is_none() and (not has_directive(response.headers.values("Cache-Control"), "no-transform")) and compressible(media, settings.types)
+  if eligible {
+    let varies = has_directive(response.headers.values("Vary"), "Accept-Encoding") or has_directive(response.headers.values("Vary"), "*")
+    if not varies {
+      response.headers.add("Vary", "Accept-Encoding")
+    }
+    accepts_gzip(request.headers.values("Accept-Encoding"))
+  } else {
+    false
+  }
+}
+
+private fn not_modified(request: Request, response: Response) Bool {
+  let etag = response.headers.get("ETag").or("")
+  let method_applies = request.method == "GET" or request.method == "HEAD"
+  if (not method_applies) or response.status != 200 or etag == "" {
+    false
+  } else {
+    mut matched = false
+    for value in request.headers.values("If-None-Match") {
+      for candidate in strings::Split(value, ",") {
+        let tag = strings::TrimSpace(candidate)
+        if tag == "*" or weak_opaque(tag) == weak_opaque(etag) {
+          matched = true
+        }
+      }
+    }
+    matched
+  }
+}
+
+// An entity tag without its weakness indicator, for weak comparison.
+private fn weak_opaque(tag: Str) Str {
+  strings::TrimPrefix(strings::TrimSpace(tag), "W/")
+}
+
+private fn gzip_etag(etag: Str) Str {
+  if strings::HasSuffix(etag, "\"") and not strings::HasSuffix(etag, "-gzip\"") {
+    "{strings::TrimSuffix(etag, "\"")}-gzip\""
+  } else {
+    etag
+  }
+}
+
+private fn media_type(content_type: Str) Str {
+  let main_part = strings::Split(content_type, ";").at(0).or("")
+  strings::ToLower(strings::TrimSpace(main_part))
+}
+
+// Whether a comma-separated header (e.g. Cache-Control, Vary) lists
+// `name`, ignoring case, whitespace, and directive arguments.
+private fn has_directive(values: [Str], name: Str) Bool {
+  mut found = false
+  for value in values {
+    for part in strings::Split(value, ",") {
+      let directive = strings::Split(part, "=").at(0).or("")
+      if strings::EqualFold(strings::TrimSpace(directive), name) {
+        found = true
+      }
+    }
+  }
+  found
+}
+
+private fn accepts_gzip(values: [Str]) Bool {
+  mut gzip: Bool? = Maybe::new()
+  mut wildcard = false
+  for value in values {
+    for part in strings::Split(value, ",") {
+      let fields = strings::Split(part, ";")
+      let name = strings::ToLower(strings::TrimSpace(fields.at(0).or("")))
+      mut allowed = true
+      for field in fields {
+        let pair = strings::SplitN(field, "=", 2)
+        if pair.size() == 2 and strings::EqualFold(strings::TrimSpace(pair.at(0).or("")), "q") {
+          match strconv::ParseFloat(strings::TrimSpace(pair.at(1).or("")), 64) {
+            ok(q) => {
+              if q == 0.0 {
+                allowed = false
+              }
+            },
+            err => (),
+          }
+        }
+      }
+      if name == "gzip" {
+        gzip = Maybe::new(allowed)
+      } else if name == "*" {
+        wildcard = allowed
+      }
+    }
+  }
+  gzip.or(wildcard)
+}
+
+private fn compressible(media: Str, types: [Str]?) Bool {
+  match types {
+    allowed => {
+      mut found = false
+      for entry in allowed {
+        let wanted = strings::ToLower(entry)
+        if wanted == media or strings::HasSuffix(wanted, "/*") and strings::HasPrefix(media, strings::TrimSuffix(wanted, "*")) {
+          found = true
+        }
+      }
+      found
+    },
+    _ => {
+      if media == "text/event-stream" {
+        false
+      } else if strings::HasPrefix(media, "text/") or strings::HasSuffix(media, "+json") or strings::HasSuffix(media, "+xml") {
+        true
+      } else {
+        list_contains(
+          [
+            "application/json",
+            "application/javascript",
+            "application/xml",
+            "application/wasm",
+            "image/svg+xml",
+          ],
+          media,
+        )
+      }
+    },
+  }
+}
+
+private fn compression_settings(stored: Any?) Compression? {
+  match stored {
+    value => unsafe::cast<Compression>(value),
+    _ => Maybe::new(),
+  }
+}
+
+private struct Compression {
+  min_bytes: Int,
+  types: [Str]?,
+  cache: &mut GzipCache,
+}
+
+// Compressed bodies by strong ETag, so unchanged assets are compressed once.
+// Bounded because applications choose the tags.
+private struct GzipCache {
+  lock: sync::Mutex,
+  entries: [Str: [Byte]],
+}
+
+impl GzipCache {
+  fn mut compress(etag: Str, body: [Byte]) [Byte] {
+    let cacheable = etag != "" and not strings::HasPrefix(etag, "W/")
+    self.lock.Lock()
+    let cached = match cacheable {
+      true => self.entries.get(etag),
+      false => Maybe::new(),
+    }
+    self.lock.Unlock()
+    match cached {
+      hit => hit,
+      _ => {
+        let compressed = gzip_bytes(body)
+        if cacheable {
+          self.lock.Lock()
+          if self.entries.size() < GZIP_CACHE_ENTRIES {
+            self.entries.set(etag, compressed)
+          }
+          self.lock.Unlock()
+        }
+        compressed
+      },
+    }
+  }
+}
+
+private fn gzip_bytes(body: [Byte]) [Byte] {
+  let buffer = &mut bytes::Buffer{}
+  let writer = gzip::NewWriter(buffer)
+  mut input = body
+  writer.Write(&mut input)
+  writer.Close()
+  buffer.Bytes()
 }
 
 private fn finalize_safely(method: Str, response: Response) Response {
@@ -1182,7 +1442,7 @@ private fn handle_safely(
   middleware_handlers: [Middleware],
   routes: [Route],
   fallback_handlers: FallbackHandlers,
-  observers: Observers,
+  options: ServeOptions,
   request: Request,
 ) Response {
   let trace = &mut PanicTrace{completed: false, stack: ""}
@@ -1194,7 +1454,7 @@ private fn handle_safely(
     ok(response) => response,
     err(message) => {
       report_panic(
-        observers,
+        options,
         Panic{
           method: request.method,
           path: request.path,
@@ -1606,7 +1866,7 @@ private fn deliver_http_response(
   path: Str,
   request_context_value: go_context::Context,
   response: Response,
-  observers: Observers,
+  options: ServeOptions,
   record: &mut DeliveryRecord,
 ) {
   let state = response_state(response)
@@ -1623,7 +1883,7 @@ private fn deliver_http_response(
         message: "",
         stack: "",
       },
-      observers,
+      options,
       record,
     )
   } else {
@@ -1638,7 +1898,7 @@ private fn deliver_sse_response(
   response: Response,
   handler: SSEHandler,
   origin: Panic,
-  observers: Observers,
+  options: ServeOptions,
   record: &mut DeliveryRecord,
 ) {
   // The stream ends when the request or transport is cancelled, or when the
@@ -1690,7 +1950,7 @@ private fn deliver_sse_response(
     err(message) => {
       state.usable = false
       report_panic(
-        observers,
+        options,
         Panic{
           method: origin.method,
           path: origin.path,

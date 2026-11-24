@@ -12,6 +12,7 @@ The package root provides Dram's HTTP foundation:
 - static, `:name`, and final-segment `*name` routes, nested route groups, and customizable 404/405 responses;
 - in-memory `App.handle(Request)` dispatch;
 - buffered text and byte responses plus deferred server-sent event streams;
+- automatic conditional `GET` (304) for responses with an `ETag`, and opt-in gzip compression;
 - case-insensitive, multi-value headers;
 - bounded request bodies with a 1 MiB default;
 - `net/http.Server` integration through `App.listen(port, host?)`, a `Server` handle from `App.bind`, or a standard `http.Handler` snapshot;
@@ -219,6 +220,27 @@ let independent = response.headers.clone()
 `get` returns the first value as `Str?`, `values` returns an independent list of every value, and `clone` creates an independent header map. Header names are case-insensitive and their iteration order is unspecified.
 
 `response.bytes` uses `application/octet-stream`; use `response.data(status, content_type, bytes)` for an explicit media type. `response.json(status, value)` buffers compact JSON with `application/json; charset=utf-8`. Encoding completes before the response changes; unsupported values panic and are replaced by the recovery boundary's generic 500 response. Pre-encoded JSON should use `response.data` to avoid encoding it as a JSON string.
+
+### Conditional requests and compression
+
+Dram negotiates the representation after all middleware has run, just before delivery, so the final response is what counts.
+
+A `GET` or `HEAD` response with status 200 and an `ETag` header is answered with `304 Not Modified` when the request's `If-None-Match` names that tag (weak comparison; `*` matches). Handlers set the validator and the full body; Dram decides whether to send it:
+
+```ard
+app.get("/app.js", fn(request, response) {
+  response.headers.set("ETag", "\"{asset_hash}\"")
+  response.headers.set("Cache-Control", "no-cache")
+  response.data(200, "text/javascript; charset=utf-8", asset_bytes)
+})
+```
+
+`app.compress(min_bytes?, types?)` opts into gzip for buffered responses whose client accepts it. Eligible responses have a body of at least `min_bytes` (default 1024), no `Content-Encoding`, no `Cache-Control: no-transform`, and a compressible media type. By default that is text (except event streams), JSON, JavaScript, XML, SVG, WebAssembly, and `+json`/`+xml` types. `types` replaces the list, and `type/*` entries match a whole type. Eligible responses get `Vary: Accept-Encoding`. The gzip representation's ETag gains a `-gzip` suffix, and conditional requests are matched against the representation being sent. Compressed bodies are cached per strong ETag. Event streams are never compressed.
+
+```ard
+app.compress()                                   // defaults
+app.compress(min_bytes: 512, types: ["text/*"])  // custom
+```
 
 ### Server-sent events
 

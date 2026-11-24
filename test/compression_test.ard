@@ -1,0 +1,235 @@
+use ard/testing
+
+use go:bytes
+use go:compress/gzip
+use dram/dram
+use go:io
+use go:net/http
+use go:net/http/httptest
+use go:strings
+
+fn large_text() Str {
+  strings::Repeat("dram compresses text. ", 100)
+}
+
+fn serve(handler: http::Handler, method: Str, target: Str, headers: [Str: Str]) &mut httptest::ResponseRecorder {
+  let recorder = httptest::NewRecorder()
+  let request = httptest::NewRequest(method, target, strings::NewReader(""))
+  for name in headers.keys() {
+    request.Header.Set(name, headers.get(name).or(""))
+  }
+  handler.ServeHTTP(recorder, request)
+  recorder
+}
+
+fn gunzip(body: [Byte]) Str!Str {
+  let reader = try gzip::NewReader(bytes::NewReader(body)) -> error { Result::err(error.error()) }
+  let plain = try io::ReadAll(reader) -> error { Result::err(error.error()) }
+  Result::ok(Str::from(plain))
+}
+
+fn text_app() &mut dram::App {
+  let app = &mut dram::App::new()
+  app.get("/page", fn(request, response) {
+    response.headers.set("ETag", "\"v1\"")
+    response.data(200, "text/html; charset=utf-8", large_text().bytes())
+  })
+  app.get("/small", fn(request, response) {
+    response.text(200, "tiny")
+  })
+  app.get("/png", fn(request, response) {
+    response.data(200, "image/png", large_text().bytes())
+  })
+  app.get("/no-transform", fn(request, response) {
+    response.headers.set("Cache-Control", "public, No-Transform")
+    response.text(200, large_text())
+  })
+  app.get("/encoded", fn(request, response) {
+    response.headers.set("Content-Encoding", "br")
+    response.text(200, large_text())
+  })
+  app.get("/no-content", fn(request, response) {
+    response.text(204, large_text())
+  })
+  app.get("/events", fn(request, response) {
+    response.sse(fn(events) {
+      events.send(data: large_text())
+    })
+  })
+  app
+}
+
+test fn conditional_get_is_automatic_for_etagged_responses() Void!Str {
+  let app = text_app()
+  let handler: http::Handler = app.*
+
+  let fresh = serve(handler, "GET", "/page", [:])
+  try testing::assert(fresh.Code == 200 and fresh.Header().Get("ETag") == "\"v1\"", "fresh response")
+  for held in ["\"v1\"", "W/\"v1\"", "\"other\", \"v1\"", "*"] {
+    let response = serve(handler, "GET", "/page", ["If-None-Match": held])
+    try testing::assert(response.Code == 304, "If-None-Match {held} was not 304")
+    try testing::assert(response.Body.Len() == 0, "304 carried a body")
+    try testing::assert(response.Header().Get("ETag") == "\"v1\"", "304 lost its ETag")
+  }
+  try testing::assert(
+    serve(handler, "GET", "/page", ["If-None-Match": "\"v0\""]).Code == 200,
+    "stale tag",
+  )
+  let head = serve(handler, "HEAD", "/page", ["If-None-Match": "\"v1\""])
+  try testing::assert(head.Code == 304, "HEAD is not conditional")
+
+  app.post("/page", fn(request, response) {
+    response.headers.set("ETag", "\"v1\"")
+    response.text(200, "posted")
+  })
+  app.get("/missing-etag", fn(request, response) {
+    response.headers.set("ETag", "\"v1\"")
+    response.text(404, "gone")
+  })
+  let handler: http::Handler = app.*
+  try testing::assert(
+    serve(handler, "POST", "/page", ["If-None-Match": "\"v1\""]).Code == 200,
+    "POST became 304",
+  )
+  try testing::assert(
+    serve(handler, "GET", "/missing-etag", ["If-None-Match": "\"v1\""]).Code == 404,
+    "non-200 became 304",
+  )
+
+  let request = &mut dram::Request::new("GET", "/page")
+  request.headers.set("If-None-Match", "\"v1\"")
+  try testing::assert(app.handle(request.*).status == 304, "App.handle is not conditional")
+  testing::pass()
+}
+
+test fn compression_is_opt_in() Void!Str {
+  let handler: http::Handler = text_app().*
+  let response = serve(handler, "GET", "/page", ["Accept-Encoding": "gzip"])
+  try testing::assert(response.Header().Get("Content-Encoding") == "", "compressed without compress()")
+  try testing::assert(response.Header().Get("Vary") == "", "Vary without compress()")
+  testing::pass()
+}
+
+test fn compress_gzips_eligible_responses_for_accepting_clients() Void!Str {
+  let app = text_app()
+  app.compress()
+  let handler: http::Handler = app.*
+
+  let gzipped = serve(handler, "GET", "/page", ["Accept-Encoding": "br;q=1.0, gzip;q=0.8"])
+  try testing::assert(gzipped.Code == 200, "status")
+  try testing::assert(gzipped.Header().Get("Content-Encoding") == "gzip", "not gzipped")
+  try testing::assert(gzipped.Header().Get("Vary") == "Accept-Encoding", "missing Vary")
+  try testing::assert(gzipped.Header().Get("ETag") == "\"v1-gzip\"", "gzip ETag")
+  try testing::assert(
+    gzipped.Header().Get("Content-Length") == gzipped.Body.Len().to_str(),
+    "Content-Length is not the compressed size",
+  )
+  try testing::assert(gzipped.Body.Len() < large_text().size() / 4, "did not shrink")
+  try testing::assert(gunzip(gzipped.Body.Bytes()).or("") == large_text(), "round trip")
+  let again = serve(handler, "GET", "/page", ["Accept-Encoding": "gzip"])
+  try testing::assert(again.Body.String() == gzipped.Body.String(), "cached output differs")
+
+  let head = serve(handler, "HEAD", "/page", ["Accept-Encoding": "gzip"])
+  try testing::assert(head.Body.Len() == 0, "HEAD body")
+  try testing::assert(
+    head.Header().Get("Content-Length") == gzipped.Header().Get("Content-Length") and head.Header().Get("Content-Encoding") == "gzip",
+    "HEAD headers differ from GET",
+  )
+
+  let identity = serve(handler, "GET", "/page", [:])
+  try testing::assert(identity.Header().Get("Content-Encoding") == "", "gzipped without Accept-Encoding")
+  try testing::assert(identity.Header().Get("Vary") == "Accept-Encoding", "identity response lacks Vary")
+  try testing::assert(identity.Header().Get("ETag") == "\"v1\"", "identity ETag changed")
+  for refused in ["gzip;q=0", "gzip;q=0.000, br", "identity", "*;q=0", "gzip;q=0, *"] {
+    let response = serve(handler, "GET", "/page", ["Accept-Encoding": refused])
+    try testing::assert(response.Header().Get("Content-Encoding") == "", "gzipped for {refused}")
+  }
+  try testing::assert(
+    serve(handler, "GET", "/page", ["Accept-Encoding": "*"]).Header().Get("Content-Encoding") == "gzip",
+    "wildcard",
+  )
+
+  for path in ["/small", "/png", "/no-transform", "/no-content"] {
+    let response = serve(handler, "GET", path, ["Accept-Encoding": "gzip"])
+    try testing::assert(response.Header().Get("Content-Encoding") == "", "{path} was gzipped")
+    try testing::assert(response.Header().Get("Vary") == "", "{path} has Vary")
+  }
+  let encoded = serve(handler, "GET", "/encoded", ["Accept-Encoding": "gzip"])
+  try testing::assert(encoded.Header().Get("Content-Encoding") == "br", "existing encoding replaced")
+  try testing::assert(encoded.Body.String() == large_text(), "pre-encoded body changed")
+
+  let events = serve(handler, "GET", "/events", ["Accept-Encoding": "gzip"])
+  try testing::assert(events.Header().Get("Content-Encoding") == "", "event stream gzipped")
+  try testing::assert(events.Body.String() == "data: {large_text()}\n\n", "event stream changed")
+  testing::pass()
+}
+
+test fn conditional_requests_match_the_selected_representation() Void!Str {
+  let app = text_app()
+  app.compress()
+  let handler: http::Handler = app.*
+
+  let identity_tag_gzip_client = serve(
+    handler,
+    "GET",
+    "/page",
+    ["Accept-Encoding": "gzip", "If-None-Match": "\"v1\""],
+  )
+  try testing::assert(
+    identity_tag_gzip_client.Code == 200,
+    "identity tag matched the gzip representation",
+  )
+  try testing::assert(identity_tag_gzip_client.Header().Get("Content-Encoding") == "gzip", "not gzipped")
+
+  let gzip_tag = serve(
+    handler,
+    "GET",
+    "/page",
+    ["Accept-Encoding": "gzip", "If-None-Match": "\"v1-gzip\""],
+  )
+  try testing::assert(gzip_tag.Code == 304, "gzip tag was not 304")
+  try testing::assert(gzip_tag.Header().Get("ETag") == "\"v1-gzip\"", "304 ETag")
+  try testing::assert(gzip_tag.Header().Get("Vary") == "Accept-Encoding", "304 lacks Vary")
+  try testing::assert(gzip_tag.Body.Len() == 0, "304 body")
+
+  let gzip_tag_identity_client = serve(handler, "GET", "/page", ["If-None-Match": "\"v1-gzip\""])
+  try testing::assert(
+    gzip_tag_identity_client.Code == 200,
+    "gzip tag matched the identity representation",
+  )
+  try testing::assert(
+    gzip_tag_identity_client.Header().Get("Content-Encoding") == "",
+    "identity client got gzip",
+  )
+  testing::pass()
+}
+
+test fn compression_sees_the_response_after_all_middleware() Void!Str {
+  let app = &mut dram::App::new()
+  app.compress(min_bytes: 10, types: ["text/*"])
+  app.use(fn(request, response, next) {
+    next.run(request, response)
+    response.body = "{Str::from(response.body)} and outer middleware".bytes()
+    response.headers.set("ETag", "\"outer\"")
+  })
+  app.get("/", fn(request, response) {
+    response.text(200, "handler")
+  })
+  app.get("/json", fn(request, response) {
+    response.json(200, ["message": "json is not listed in types"])
+  })
+  let handler: http::Handler = app.*
+  let response = serve(handler, "GET", "/", ["Accept-Encoding": "gzip"])
+  try testing::assert(response.Header().Get("Content-Encoding") == "gzip", "custom settings not applied")
+  try testing::assert(
+    gunzip(response.Body.Bytes()).or("") == "handler and outer middleware",
+    "compressed an earlier body",
+  )
+  try testing::assert(
+    response.Header().Get("ETag") == "\"outer-gzip\"",
+    "ETag from before outer middleware",
+  )
+  let json = serve(handler, "GET", "/json", ["Accept-Encoding": "gzip"])
+  try testing::assert(json.Header().Get("Content-Encoding") == "", "type outside custom list gzipped")
+  testing::pass()
+}
