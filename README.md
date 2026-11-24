@@ -14,7 +14,9 @@ The package root provides Dram's HTTP foundation:
 - buffered text and byte responses plus deferred server-sent event streams;
 - case-insensitive, multi-value headers;
 - bounded request bodies with a 1 MiB default;
-- `net/http.Server` integration through `App.listen(port, host?)` or a standard `http.Handler` snapshot.
+- `net/http.Server` integration through `App.listen(port, host?)`, a `Server` handle from `App.bind`, or a standard `http.Handler` snapshot;
+- graceful shutdown that drains in-flight requests and ends event streams;
+- panic and request-completion observers for logging.
 
 ```ard
 use dram
@@ -47,7 +49,24 @@ Examples:
 
 ## Serving
 
-`App` implements Go's standard `http.Handler` interface. `listen` is the simple blocking entry point; applications that need custom timeouts, asynchronous startup, or graceful shutdown can use the app with their own `http.Server`:
+`listen` is the simple blocking entry point. It serves until SIGINT or SIGTERM, then shuts down gracefully: it stops accepting, ends event streams, and gives in-flight requests up to 10 seconds to finish. A second signal closes remaining connections at once. `listen` returns `ok` after a graceful stop.
+
+For control over startup, timeouts, signals, or shutdown, bind a `Server` instead. Binding opens the listener immediately, so address errors surface before serving and port 0 resolves to a real port:
+
+```ard
+let server = try app.bind(port: 0, host: "0.0.0.0")
+server.set_timeouts(write_ms: 60_000)
+fmt::Println("listening on {server.address()}")
+async::start(fn() {
+  // e.g. after a signal or a test finishes
+  server.shutdown(timeout_ms: 5_000)
+})
+server.serve().expect("server failed")
+```
+
+`serve` blocks until the server stops and returns only after a graceful shutdown has finished. `shutdown(timeout_ms?)` closes the listener, cancels every event stream (`stream.done()` fires and `stream.cancelled()` becomes true), sets `request.draining()`, and waits for in-flight requests. Connections still open at the deadline (default 10 seconds) are closed and an error is returned. `close()` stops immediately. Timeouts default to 5s read header, 30s read, 30s write, and 120s idle.
+
+`App` also implements Go's standard `http.Handler` interface, so applications can serve it with their own `http.Server`:
 
 ```ard
 use go:net/http
@@ -59,7 +78,25 @@ let server = &mut http::Server{
 server.ListenAndServe()
 ```
 
-Assign the app by value (`app.*`) as shown to capture its configured state. Passing the `app` pointer itself creates a live handler reference instead; applications using that form must synchronize every registration change with request dispatch.
+Assign the app by value (`app.*`) as shown to capture its configured state. Passing the `app` pointer itself creates a live handler reference instead; applications using that form must synchronize every registration change with request dispatch. Application-owned servers do not receive Dram's drain signal, so their event streams end only when clients disconnect.
+
+## Observability
+
+Recovered panics are reported with their message and the stack at the panic site. By default Dram writes them to stderr; `on_panic` routes them elsewhere. Clients never see panic details.
+
+```ard
+app.on_panic(fn(report: dram::Panic) {
+  fmt::Println("{report.method} {report.path}: {report.message}\n{report.stack}")
+})
+```
+
+`on_complete` observes every request after delivery, including requests rejected before dispatch and responses produced by short-circuiting middleware. Event streams report when they end, so `duration` covers the stream's lifetime and `bytes` counts what was written. Dram writes no access log itself.
+
+```ard
+app.on_complete(fn(done: dram::Completion) {
+  fmt::Println("{done.method} {done.path} {done.status} {done.bytes}B {done.duration.String()}")
+})
+```
 
 ## Routing
 
@@ -204,7 +241,7 @@ app.get(
 )
 ```
 
-`stream.send` formats multiline data, optional event names, IDs, and non-negative retry milliseconds, then flushes the event. `stream.comment(text)` writes and flushes an SSE comment for application-managed heartbeats. Both return `false` after cancellation or a transport failure. Event names and IDs reject CR, LF, and NUL characters.
+`stream.send` formats multiline data, optional event names, IDs, and non-negative retry milliseconds, then flushes the event. `stream.done()` is a receiver that closes when the client disconnects, the request context is cancelled, or the server begins shutting down; `select` on it while waiting for application events. `stream.comment(text)` writes and flushes an SSE comment for application-managed heartbeats. Both return `false` after cancellation or a transport failure. Event names and IDs reject CR, LF, and NUL characters.
 
 The first event or comment commits the status and headers. A panic before commitment becomes Dram's generic 500 response; a panic after commitment aborts the stream without replacing output already sent. A callback that returns without sending still completes an empty SSE response. `HEAD` sends the corresponding headers without running the callback. Selecting a buffered response helper after `sse` replaces the stream.
 
@@ -235,6 +272,6 @@ ard build examples/ai-chat/main.ard --out /tmp/dram-ai-chat
 
 ## Current limits
 
-Routing supports static paths, single-segment and catch-all parameters, and static-prefix route groups. Ordinary responses and all request bodies are buffered; oversized bodies return 413 and other body decoding failures return 400. SSE is the only streaming delivery mode. Informational statuses and successful CONNECT responses are not supported as final buffered responses. Panic recovery uses Ard's `unsafe` boundary, returns a generic 500 before commitment, and does not currently capture or log a stack. Generic streams, files, WebSockets, automatic SSE heartbeats, and detached request contexts are not exposed yet.
+Routing supports static paths, single-segment and catch-all parameters, and static-prefix route groups. Ordinary responses and all request bodies are buffered; oversized bodies return 413 and other body decoding failures return 400. SSE is the only streaming delivery mode. Informational statuses and successful CONNECT responses are not supported as final buffered responses. Panic recovery uses Ard's `unsafe` boundary and returns a generic 500 before commitment. Generic streams, files, WebSockets, automatic SSE heartbeats, and detached request contexts are not exposed yet.
 
 Architecture decisions live in [`docs/`](./docs/).

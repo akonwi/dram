@@ -73,9 +73,9 @@ This checklist collects the planned and incomplete work described by the accepte
 
 ## Panic recovery and observability
 
-- [ ] Replace the current minimal recovery boundary with panic message and stack capture.
-- [ ] Add a configurable logger or recovery observer.
-- [ ] Keep panic details out of client responses by default.
+- [x] Replace the current minimal recovery boundary with panic message and stack capture.
+- [x] Add a configurable logger or recovery observer.
+- [x] Keep panic details out of client responses by default.
 - [ ] Implement recovery behavior for unopened and opened file responses.
 - [ ] Implement recovery behavior before and after stream commitment.
 - [x] Implement recovery behavior before and after SSE commitment.
@@ -83,9 +83,10 @@ This checklist collects the planned and incomplete work described by the accepte
 
 ## Server lifecycle
 
-- [ ] Add graceful shutdown.
-- [ ] Add an explicit server handle or lifecycle API.
-- [ ] Make lifecycle timeouts configurable.
+- [x] Add graceful shutdown.
+- [x] Add an explicit server handle or lifecycle API.
+- [x] Make lifecycle timeouts configurable.
+- [ ] Evaluate a drain signal for apps served by an application-owned `http.Server`.
 - [x] Revisit write-timeout behavior before introducing long-lived streams and SSE.
 
 ## Testing infrastructure

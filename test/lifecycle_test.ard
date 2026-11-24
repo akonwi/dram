@@ -1,0 +1,310 @@
+use ard/async
+use ard/testing
+
+use dram/dram
+use go:io
+use go:net/http
+use go:net/http/httptest
+use go:strings
+use go:time
+
+fn record_request(handler: http::Handler, method: Str, target: Str) &mut httptest::ResponseRecorder {
+  let recorder = httptest::NewRecorder()
+  handler.ServeHTTP(recorder, httptest::NewRequest(method, target, strings::NewReader("")))
+  recorder
+}
+
+fn explode(label: Str) {
+  panic("exploded: {label}")
+}
+
+fn get(url: Str) Str!Str {
+  let response = try http::Get(url) -> error { Result::err(error.error()) }
+  defer response.Body.Close()
+  let body = try io::ReadAll(response.Body) -> error { Result::err(error.error()) }
+  Result::ok("{response.StatusCode} {Str::from(body)}")
+}
+
+test fn panics_are_observed_with_message_and_stack() Void!Str {
+  let reports: &mut [dram::Panic] = &mut []
+  let app = &mut dram::App::new()
+  app.on_panic(fn(report) {
+    reports.push(report)
+  })
+  app.get("/boom", fn(request, response) {
+    response.text(200, "partial")
+    explode("handler")
+  })
+
+  let handler: http::Handler = app.*
+  let response = record_request(handler, "GET", "/boom?x=1")
+  try testing::assert(response.Code == 500, "panic was not recovered")
+  try testing::assert(response.Body.String() == "Internal Server Error", "panic details leaked")
+  try testing::assert(reports.size() == 1, "panic was not observed once")
+  let report = reports.at(0).expect("one report")
+  try testing::assert(report.method == "GET", "panic method missing")
+  try testing::assert(report.path == "/boom", "panic path missing")
+  try testing::assert(report.message == "exploded: handler", "panic message missing: {report.message}")
+  try testing::assert(
+    strings::Contains(report.stack, "Explode"),
+    "stack lacks the panic site: {report.stack}",
+  )
+
+  let in_memory = app.handle(dram::Request::new("POST", "/boom"))
+  try testing::assert(in_memory.status == 405, "unexpected in-memory status")
+  app.post("/boom", fn(request, response) {
+    explode("in memory")
+  })
+  let recovered = app.handle(dram::Request::new("POST", "/boom"))
+  try testing::assert(recovered.status == 500, "in-memory panic was not recovered")
+  try testing::assert(reports.size() == 2, "in-memory panic was not observed")
+  testing::pass()
+}
+
+test fn event_stream_panics_are_observed_before_and_after_commitment() Void!Str {
+  let messages: &mut [Str] = &mut []
+  let app = &mut dram::App::new()
+  app.on_panic(fn(report) {
+    messages.push("{report.path} {report.message}")
+  })
+  app.get("/before", fn(request, response) {
+    response.sse(fn(events) {
+      explode("before")
+    })
+  })
+  app.get("/after", fn(request, response) {
+    response.sse(fn(events) {
+      events.send(data: "visible")
+      explode("after")
+    })
+  })
+
+  let handler: http::Handler = app.*
+  let before = record_request(handler, "GET", "/before")
+  try testing::assert(before.Code == 500, "pre-commit panic did not become 500")
+  let after = httptest::NewRecorder()
+  let outcome = unsafe {
+    handler.ServeHTTP(after, httptest::NewRequest("GET", "/after", strings::NewReader("")))
+  }
+  try testing::assert(outcome.is_err(), "post-commit panic did not abort delivery")
+  try testing::assert(
+    strings::Join(messages.*, ", ") == "/before exploded: before, /after exploded: after",
+    "stream panics were not observed: {strings::Join(messages.*, ", ")}",
+  )
+  testing::pass()
+}
+
+test fn completions_report_delivered_status_and_bytes() Void!Str {
+  let completions: &mut [dram::Completion] = &mut []
+  let app = &mut dram::App::new()
+  app.on_complete(fn(completion) {
+    completions.push(completion)
+  })
+  app.use(fn(request, response, next) {
+    if request.path == "/denied" {
+      response.text(401, "no")
+    } else {
+      next.run(request, response)
+    }
+  })
+  app.get("/hello", fn(request, response) {
+    response.text(200, "hello")
+  })
+  app.get("/events", fn(request, response) {
+    response.sse(fn(events) {
+      events.send(data: "one")
+    })
+  })
+  app.get("/after", fn(request, response) {
+    response.sse(fn(events) {
+      events.send(data: "visible")
+      explode("after")
+    })
+  })
+
+  let handler: http::Handler = app.*
+  record_request(handler, "GET", "/hello")
+  record_request(handler, "HEAD", "/hello")
+  record_request(handler, "GET", "/denied")
+  record_request(handler, "GET", "/missing")
+  record_request(handler, "GET", "/events")
+  let aborted = unsafe {
+    record_request(handler, "GET", "/after")
+  }
+  try testing::assert(aborted.is_err(), "post-commit panic did not abort delivery")
+
+  let summary: &mut [Str] = &mut []
+  for completion in completions.* {
+    summary.push("{completion.method} {completion.path} {completion.status} {completion.bytes}")
+    try testing::assert(completion.duration >= 0, "negative duration")
+  }
+  let expected = [
+    "GET /hello 200 5",
+    "HEAD /hello 200 0",
+    "GET /denied 401 2",
+    "GET /missing 404 0",
+    "GET /events 200 11",
+    "GET /after 200 15",
+  ]
+  testing::assert(
+    strings::Join(summary.*, ", ") == strings::Join(expected, ", "),
+    "completions changed: {strings::Join(summary.*, ", ")}",
+  )
+}
+
+test fn bind_reports_errors_and_the_chosen_port() Void!Str {
+  let app = &mut dram::App::new()
+  let invalid = match app.bind(port: 70000) {
+    ok => "bound",
+    err(message) => message,
+  }
+  try testing::assert(invalid == "port must be between 0 and 65535", invalid)
+  let server = try app.bind(port: 0)
+  try testing::assert(server.port() > 0, "port 0 did not resolve")
+  try testing::assert(strings::HasPrefix(server.address(), "127.0.0.1:"), "default host changed")
+  let taken = match app.bind(port: server.port()) {
+    ok => "bound",
+    err(message) => message,
+  }
+  try testing::assert(strings::Contains(taken, "address already in use"), taken)
+  server.close()
+  testing::pass()
+}
+
+test fn stopping_before_serve_releases_the_listener() Void!Str {
+  let app = &mut dram::App::new()
+  let first = try app.bind(port: 0)
+  let port = first.port()
+  try first.shutdown()
+  try testing::assert(first.serve().is_ok(), "serve after shutdown did not return ok")
+  let second = try app.bind(port: port)
+  try second.close()
+  let third = try app.bind(port: port)
+  third.set_timeouts(write_ms: 1000)
+  try third.close()
+  testing::pass()
+}
+
+test fn shutdown_drains_requests_and_ends_event_streams() Void!Str {
+  let release = Chan::new<Bool>(1)
+  let slow_started = Chan::new<Bool>(1)
+  let stream_open = Chan::new<Bool>(1)
+  let stream_result = Chan::new<Str>(1)
+  let app = &mut dram::App::new()
+  app.get("/slow", fn(request, response) {
+    slow_started.send(true)
+    release.recv()
+    response.text(200, "draining={request.draining()}")
+  })
+  app.get("/events", fn(request, response) {
+    response.sse(fn(events) {
+      events.send(data: "open")
+      stream_open.send(true)
+      let ended = select {
+        events.done().recv() => "done",
+        time::After(5 * time::Second).recv() => "timeout",
+      }
+      stream_result.send("{ended} cancelled={events.cancelled()} draining={request.draining()}")
+    })
+  })
+
+  let server = try app.bind(port: 0)
+  let base = "http://{server.address()}"
+  let served = Chan::new<Str>(1)
+  async::start(fn() {
+    served.send(
+      match server.serve() {
+        ok => "ok",
+        err(message) => message,
+      },
+    )
+  })
+
+  try testing::assert(get("{base}/missing").or("") == "404 ", "server is not serving")
+
+  // An open event stream.
+  let stream_response = try http::Get("{base}/events") -> error { Result::err(error.error()) }
+  stream_open.recv()
+  // An in-flight request.
+  let slow_result = Chan::new<Str>(1)
+  async::start(fn() {
+    slow_result.send(get("{base}/slow").or("failed"))
+  })
+  slow_started.recv()
+
+  let stopped = Chan::new<Str>(1)
+  async::start(fn() {
+    stopped.send(
+      match server.shutdown(timeout_ms: 5000) {
+        ok => "ok",
+        err(message) => message,
+      },
+    )
+  })
+
+  let ended = stream_result.recv().or("missing")
+  try testing::assert(
+    ended == "done cancelled=true draining=true",
+    "stream did not end on shutdown: {ended}",
+  )
+  let stream_body = try io::ReadAll(stream_response.Body) -> error { Result::err(error.error()) }
+  try testing::assert(Str::from(stream_body) == "data: open\n\n", "stream body changed")
+
+  // Shutdown waits for the in-flight request.
+  let early = select {
+    stopped.recv() => "stopped early",
+    time::After(200 * time::Millisecond).recv() => "waiting",
+  }
+  try testing::assert(early == "waiting", "shutdown did not wait for in-flight requests")
+  release.send(true)
+  try testing::assert(
+    slow_result.recv().or("") == "200 draining=true",
+    "in-flight request did not finish",
+  )
+  try testing::assert(stopped.recv().or("") == "ok", "shutdown failed")
+  try testing::assert(served.recv().or("") == "ok", "serve did not return ok")
+
+  // The listener is closed.
+  try testing::assert(get("{base}/missing").is_err(), "server still accepting")
+  testing::pass()
+}
+
+test fn shutdown_times_out_and_closes_stuck_requests() Void!Str {
+  let release = Chan::new<Bool>(1)
+  let started = Chan::new<Bool>(1)
+  let app = &mut dram::App::new()
+  app.get("/stuck", fn(request, response) {
+    started.send(true)
+    release.recv()
+    response.text(200, "late")
+  })
+  let server = try app.bind(port: 0)
+  let base = "http://{server.address()}"
+  let served = Chan::new<Str>(1)
+  async::start(fn() {
+    served.send(
+      match server.serve() {
+        ok => "ok",
+        err(message) => message,
+      },
+    )
+  })
+  let result = Chan::new<Str>(1)
+  async::start(fn() {
+    result.send(
+      match get("{base}/stuck") {
+        ok(body) => body,
+        err(message) => "error",
+      },
+    )
+  })
+  started.recv()
+  let outcome = server.shutdown(timeout_ms: 100)
+  try testing::assert(outcome.is_err(), "timed-out shutdown reported success")
+  try testing::assert(result.recv().or("") == "error", "stuck request was not closed")
+  try testing::assert(served.recv().or("") != "ok", "serve hid the forced shutdown")
+  release.send(true)
+  // Later calls report the same outcome.
+  try testing::assert(server.shutdown().is_err(), "second shutdown changed outcome")
+  testing::pass()
+}

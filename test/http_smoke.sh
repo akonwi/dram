@@ -82,4 +82,28 @@ PY
 
 DRAM_BASE_URL="http://127.0.0.1:8080" bun test test/sse_smoke.test.ts
 
+# SIGTERM shuts down gracefully: open event streams end and listen returns.
+stream_body="${TMPDIR:-/tmp}/dram-hello-smoke.stream"
+curl -sS -N http://127.0.0.1:8080/events >"$stream_body" 2>/dev/null &
+stream=$!
+for _ in $(seq 1 50); do
+  grep -q 'message 1' "$stream_body" && break
+  sleep 0.1
+done
+grep -q 'message 1' "$stream_body"
+kill -TERM "$pid"
+for _ in $(seq 1 50); do
+  kill -0 "$pid" 2>/dev/null || break
+  sleep 0.1
+done
+if kill -0 "$pid" 2>/dev/null; then
+  echo "server did not stop within 5s of SIGTERM" >&2
+  exit 1
+fi
+exit_status=0
+wait "$pid" || exit_status=$?
+[[ "$exit_status" == "0" ]]
+wait "$stream" || true
+rm -f "$stream_body"
+
 echo "HTTP smoke passed"

@@ -37,6 +37,10 @@ fn tamper_events(events: mut dram::EventStream) {
   events.store.state.usable = true
 }
 
+fn tamper_server(server: dram::Server) {
+  server._store.state.stopping = false
+}
+
 fn main() {}
 EOF
 
@@ -45,6 +49,6 @@ if ard check "$project/main.ard" >"$project/output" 2>&1; then
   exit 1
 fi
 
-[[ "$(grep -c 'Undefined field' "$project/output")" == "4" ]]
+[[ "$(grep -c 'Undefined field' "$project/output")" == "5" ]]
 [[ "$(grep -c 'Undefined method' "$project/output")" == "1" ]]
 echo "API visibility check passed"

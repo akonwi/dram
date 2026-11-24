@@ -1,18 +1,27 @@
+use ard/async
 use ard/unsafe
 
 use go:context as go_context
 use dram/context as request_context
 use go:encoding/json
+use go:errors
+use go:fmt
 use go:io
 use go:net
 use go:net/http
 use go:net/url
+use go:os
+use go:os/signal
+use go:runtime/debug
 use go:strconv
 use go:strings
+use go:sync
+use go:syscall
 use go:time
 
 let DEFAULT_MAX_BODY_BYTES = 1_048_576
 let DEFAULT_MAX_HEADER_BYTES = DEFAULT_MAX_BODY_BYTES
+let DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000
 
 private fn error_message(error: Error) Str {
   error.error()
@@ -113,6 +122,101 @@ impl Request {
       path_params: self.path_params,
     }
   }
+
+  // Whether the `Server` that accepted this request has begun shutting
+  // down. Always false for in-memory requests and for apps served by an
+  // application-owned `http.Server`.
+  fn draining() Bool {
+    match drain_signal(self.context) {
+      drain => request_context::err(drain.context).is_some(),
+      _ => false,
+    }
+  }
+}
+
+// A panic recovered while serving a request. `message` and `stack` are for
+// logs; clients only ever see a generic 500 or a closed stream.
+struct Panic {
+  method: Str,
+  path: Str,
+  message: Str,
+  stack: Str,
+}
+
+type PanicObserver = fn(Panic)
+
+// One request served over HTTP, reported after delivery finishes. For SSE
+// responses that is when the stream ends, so `duration` covers the stream's
+// lifetime. `status` is 0 when nothing was written (e.g. the client left
+// before an event stream committed).
+struct Completion {
+  method: Str,
+  path: Str,
+  status: Int,
+  bytes: Int,
+  duration: time::Duration,
+}
+
+type CompletionObserver = fn(Completion)
+
+private struct Observers {
+  panic: PanicObserver?,
+  complete: CompletionObserver?,
+}
+
+// Report a recovered panic to the observer, or to stderr without one.
+private fn report_panic(observers: Observers, report: Panic) {
+  match observers.panic {
+    observer => observer(report),
+    _ => {
+      fmt::Fprintf(
+        os::Stderr,
+        "dram: panic serving %s %s: %s\n%s\n",
+        report.method,
+        report.path,
+        report.message,
+        report.stack,
+      )
+    },
+  }
+}
+
+private struct PanicTrace {
+  completed: Bool,
+  stack: Str,
+}
+
+// Run `body`, recording the goroutine stack if it panics. The deferred
+// capture runs while the panic is still unwinding, so the stack includes
+// the panic site; the caller's `unsafe` block recovers afterwards.
+private fn trace_panics(trace: &mut PanicTrace, body: fn() $T) $T {
+  defer {
+    if not trace.completed {
+      trace.stack = Str::from(debug::Stack())
+    }
+  }
+  let value = body()
+  trace.completed = true
+  value
+}
+
+private struct DrainKey {
+  marker: Int,
+}
+
+private struct DrainSignal {
+  context: go_context::Context,
+}
+
+private fn drain_key() DrainKey {
+  DrainKey{marker: 0}
+}
+
+private fn drain_signal(context: go_context::Context) DrainSignal? {
+  match request_context::value(context, drain_key()) {
+    boxed => unsafe::cast<DrainSignal>(boxed),
+    _ => Maybe::new(),
+  }
 }
 
 private enum ResponseMode {
@@ -206,6 +310,13 @@ private struct EventStreamState {
   headers: Headers,
   committed: Bool,
   usable: Bool,
+  record: &mut DeliveryRecord,
+}
+
+// What actually reached the client, for `CompletionObserver`s.
+private struct DeliveryRecord {
+  status: Int,
+  bytes: Int,
 }
 
 struct EventStream {
@@ -251,6 +362,13 @@ impl EventStream {
     (not state.usable) or request_context::err(state.context).is_some() or request_context::err(state.transport_context).is_some()
   }
 
+  // Receives (closes) when the stream should end: the client disconnected,
+  // the request context was cancelled, or the server began shutting down.
+  // Select on it while waiting for something to send.
+  fn done() Receiver<Void> {
+    request_context::done(event_stream_state(&self).context)
+  }
+
   private fn mut write_and_flush(body: Str) Bool {
     let state = event_stream_state(self)
     if (not state.usable) or request_context::err(state.context).is_some() or request_context::err(state.transport_context).is_some() {
@@ -269,7 +387,10 @@ impl EventStream {
           state.usable = false
           -1
         },
-        ok(count) => count,
+        ok(count) => {
+          state.record.bytes =+ count
+          count
+        },
       }
       let flushed = match written == body.bytes().size() {
         false => false,
@@ -306,6 +427,7 @@ private fn commit_event_stream(stream: &mut EventStream) Bool {
   } else {
     copy_http_headers(state.writer, state.headers)
     state.committed = true
+    state.record.status = state.status
     state.writer.WriteHeader(state.status)
     true
   }
@@ -364,6 +486,8 @@ struct App {
   max_body_bytes: Int,
   _not_found_handler: Handler?,
   _method_not_allowed_handler: Handler?,
+  _panic_observer: PanicObserver?,
+  _completion_observer: CompletionObserver?,
 }
 
 private struct FallbackHandlers {
@@ -377,11 +501,13 @@ impl http::Handler for App {
       not_found: self._not_found_handler,
       method_not_allowed: self._method_not_allowed_handler,
     }
-    serve_http(
+    let observers = Observers{panic: self._panic_observer, complete: self._completion_observer}
+    serve_observed(
       self.middleware_handlers,
       self.routes,
       fallback_handlers,
       self.max_body_bytes,
+      observers,
       writer,
       raw_request,
     )
@@ -397,6 +523,8 @@ fn App::new() App {
     max_body_bytes: DEFAULT_MAX_BODY_BYTES,
     _not_found_handler: Maybe::new(),
     _method_not_allowed_handler: Maybe::new(),
+    _panic_observer: Maybe::new(),
+    _completion_observer: Maybe::new(),
   }
 }
 
@@ -418,6 +546,19 @@ impl App {
 
   fn mut method_not_allowed(handler: Handler) {
     self._method_not_allowed_handler = Maybe::new(handler)
+  }
+
+  // Observe panics recovered while serving requests, replacing the default
+  // report on stderr. Clients still receive only a generic 500, or a closed
+  // stream after an event stream has committed.
+  fn mut on_panic(observer: PanicObserver) {
+    self._panic_observer = Maybe::new(observer)
+  }
+
+  // Observe every request served over HTTP after its response has been
+  // delivered, e.g. to write access logs. Not called by `App.handle`.
+  fn mut on_complete(observer: CompletionObserver) {
+    self._completion_observer = Maybe::new(observer)
   }
 
   fn mut route(method: Str, path: Str, handler: Handler) {
@@ -475,40 +616,265 @@ impl App {
       self.routes,
       fallback_handlers,
       self.max_body_bytes,
+      Observers{panic: self._panic_observer, complete: Maybe::new()},
       request,
     )
   }
 
+  // Serve until SIGINT or SIGTERM, then shut down gracefully: stop
+  // accepting, end event streams, and let in-flight requests finish within
+  // 10 seconds. A second signal closes remaining connections immediately.
+  // Returns ok after a graceful shutdown.
   fn listen(port: Int, host: Str?) Void!Str {
+    let server = try self.bind(port: port, host: host)
+    let signals = Chan::new<os::Signal>(2)
+    signal::Notify(signals.sender(), os::Interrupt, syscall::SIGTERM)
+    async::start(fn() {
+      match signals.recv() {
+        _first => {
+          async::start(fn() {
+            server.shutdown()
+          })
+          match signals.recv() {
+            _second => server.close(),
+            _ => Result::ok(()),
+          }
+        },
+        _ => Result::ok(()),
+      }
+    })
+    let result = server.serve()
+    signal::Stop(signals.sender())
+    signals.close()
+    result
+  }
+
+  // Open a listener on `host:port` (host defaults to 127.0.0.1; port 0
+  // picks a free port) for a `Server` that serves a snapshot of this app.
+  // Binding happens now, so address errors are reported here and
+  // `server.address()` is known before `serve`.
+  fn bind(port: Int, host: Str?) Server!Str {
     if port < 0 or port > 65535 {
       Result::err("port must be between 0 and 65535")
     } else {
       let address = net::JoinHostPort(host.or("127.0.0.1"), strconv::Itoa(port))
-      let middleware_handlers: &mut [Middleware] = &mut []
-      for middleware in self.middleware_handlers {
-        middleware_handlers.push(middleware)
-      }
-      let routes: &mut [Route] = &mut []
-      for route in self.routes {
-        routes.push(route)
-      }
+      let listener = try net::Listen("tcp", address) -> error { Result::err(error.error()) }
+      let drain, cancel_drain = go_context::WithCancel(go_context::Background())
+      let base = request_context::with_value(
+        go_context::Background(),
+        drain_key(),
+        DrainSignal{context: drain},
+      )
       let server = &mut http::Server{}
-      server.Addr = address
-      server.Handler = App{
-        middleware_handlers: middleware_handlers.*,
-        routes: routes.*,
-        max_body_bytes: self.max_body_bytes,
-        _not_found_handler: self._not_found_handler,
-        _method_not_allowed_handler: self._method_not_allowed_handler,
+      server.Handler = snapshot_app(self)
+      server.BaseContext = fn(_listener: net::Listener) go_context::Context {
+        base
       }
       server.ReadHeaderTimeout = 5 * time::Second
       server.ReadTimeout = 30 * time::Second
       server.WriteTimeout = 30 * time::Second
       server.IdleTimeout = 120 * time::Second
       server.MaxHeaderBytes = DEFAULT_MAX_HEADER_BYTES
-      server.ListenAndServe().map_err(error_message)
+      let state = &mut ServerState{
+        server: server,
+        listener: listener,
+        cancel_drain: fn() {
+          cancel_drain()
+        },
+        lock: sync::Mutex{},
+        serving: false,
+        stopping: false,
+        stopped: Chan::new<Bool>(),
+        failure: Maybe::new(),
+      }
+      Result::ok(Server{_store: state})
     }
   }
+}
+
+private fn snapshot_app(app: App) App {
+  let middleware_handlers: &mut [Middleware] = &mut []
+  for middleware in app.middleware_handlers {
+    middleware_handlers.push(middleware)
+  }
+  let routes: &mut [Route] = &mut []
+  for route in app.routes {
+    routes.push(route)
+  }
+  App{
+    middleware_handlers: middleware_handlers.*,
+    routes: routes.*,
+    max_body_bytes: app.max_body_bytes,
+    _not_found_handler: app._not_found_handler,
+    _method_not_allowed_handler: app._method_not_allowed_handler,
+    _panic_observer: app._panic_observer,
+    _completion_observer: app._completion_observer,
+  }
+}
+
+private struct ServerState {
+  server: &mut http::Server,
+  listener: net::Listener,
+  cancel_drain: fn(),
+  lock: sync::Mutex,
+  serving: Bool,
+  stopping: Bool,
+  stopped: Chan<Bool>,
+  failure: Str?,
+}
+
+// A bound HTTP server for a snapshot of an `App`, created by `App.bind`.
+// `serve` blocks until the server stops; `shutdown` and `close` stop it and
+// may be called from other tasks, e.g. a signal handler.
+struct Server {
+  _store: Any,
+}
+
+impl Server {
+  // The bound address, e.g. `127.0.0.1:8080`.
+  fn address() Str {
+    server_state(self).listener.Addr().String()
+  }
+
+  // The bound port; useful after binding port 0.
+  fn port() Int {
+    match net::SplitHostPort(self.address()) {
+      ok(parts) => {
+        let _host, port = parts
+        strconv::Atoi(port).or(0)
+      },
+      err => 0,
+    }
+  }
+
+  // Replace the server's timeouts, in milliseconds (0 disables one).
+  // Defaults: read header 5s, read 30s, write 30s, idle 120s. Event streams
+  // clear the write timeout and bound each event write instead. Panics
+  // once `serve`, `shutdown`, or `close` has been called.
+  fn set_timeouts(read_header_ms: Int?, read_ms: Int?, write_ms: Int?, idle_ms: Int?) {
+    let state = server_state(self)
+    state.lock.Lock()
+    defer state.lock.Unlock()
+    if state.serving or state.stopping {
+      panic("server timeouts must be set before serving")
+    }
+    let server = state.server
+    read_header_ms.map(fn(ms) {
+      server.ReadHeaderTimeout = milliseconds(ms)
+    })
+    read_ms.map(fn(ms) {
+      server.ReadTimeout = milliseconds(ms)
+    })
+    write_ms.map(fn(ms) {
+      server.WriteTimeout = milliseconds(ms)
+    })
+    idle_ms.map(fn(ms) {
+      server.IdleTimeout = milliseconds(ms)
+    })
+  }
+
+  // Accept and serve connections until `shutdown` or `close` finishes.
+  // Returns ok after a graceful stop, or the error that stopped serving.
+  fn serve() Void!Str {
+    let state = server_state(self)
+    mark_serving(state)
+    // Serve closes the listener when it returns, including when the server
+    // was stopped before serving began.
+    match state.server.Serve(state.listener) {
+      ok => Result::ok(()),
+      err(error) => {
+        if errors::Is(error, http::ErrServerClosed) {
+          state.stopped.recv()
+          match state.failure {
+            failure => Result::err(failure),
+            _ => Result::ok(()),
+          }
+        } else {
+          Result::err(error.error())
+        }
+      },
+    }
+  }
+
+  // Stop gracefully: close the listener, end event streams (their
+  // `done()` fires and `cancelled()` becomes true; `request.draining()`
+  // turns true), and wait up to `timeout_ms` (default 10s) for in-flight
+  // requests. Connections still open at the deadline are closed and an
+  // error is returned. Later calls wait for the first one.
+  fn shutdown(timeout_ms: Int?) Void!Str {
+    let state = server_state(self)
+    if begin_stop(state) {
+      release_unserved_listener(state)
+      state.cancel_drain()
+      let deadline, cancel = go_context::WithTimeout(
+        go_context::Background(),
+        milliseconds(timeout_ms.or(DEFAULT_SHUTDOWN_TIMEOUT_MS)),
+      )
+      match state.server.Shutdown(deadline) {
+        ok => (),
+        err(error) => {
+          state.server.Close()
+          state.failure = Maybe::new("graceful shutdown did not finish: {error.error()}")
+        },
+      }
+      cancel()
+      state.stopped.close()
+    } else {
+      state.stopped.recv()
+    }
+    match state.failure {
+      failure => Result::err(failure),
+      _ => Result::ok(()),
+    }
+  }
+
+  // Stop immediately, closing every connection.
+  fn close() Void!Str {
+    let state = server_state(self)
+    let first = begin_stop(state)
+    if first {
+      release_unserved_listener(state)
+    }
+    state.cancel_drain()
+    let result = state.server.Close().map_err(error_message)
+    if first {
+      state.stopped.close()
+    }
+    result
+  }
+}
+
+private fn server_state(server: Server) &mut ServerState {
+  unsafe::cast<&mut ServerState>(server._store).expect("invalid internal server state")
+}
+
+// Mark the server as stopping; true for the first caller only.
+private fn begin_stop(state: &mut ServerState) Bool {
+  state.lock.Lock()
+  defer state.lock.Unlock()
+  let first = not state.stopping
+  state.stopping = true
+  first
+}
+
+private fn mark_serving(state: &mut ServerState) {
+  state.lock.Lock()
+  defer state.lock.Unlock()
+  state.serving = true
+}
+
+// Close the listener of a server stopped before `serve`; Go's server only
+// closes listeners that `Serve` has registered.
+private fn release_unserved_listener(state: &mut ServerState) {
+  state.lock.Lock()
+  defer state.lock.Unlock()
+  if not state.serving {
+    state.listener.Close()
+  }
+}
+
+private fn milliseconds(ms: Int) time::Duration {
+  time::Duration::from(ms) * time::Millisecond
 }
 
 struct Group {
@@ -656,11 +1022,56 @@ private fn make_next(callback: fn(Request, &mut Response)) Next {
   Next{store: state}
 }
 
+// `serve_http`, then report the delivery to the completion observer. The
+// report is deferred so aborted event streams are reported too.
+private fn serve_observed(
+  middleware_handlers: [Middleware],
+  routes: [Route],
+  fallback_handlers: FallbackHandlers,
+  max_body_bytes: Int,
+  observers: Observers,
+  writer: http::ResponseWriter,
+  raw_request: &mut http::Request,
+) {
+  let record = &mut DeliveryRecord{status: 0, bytes: 0}
+  let started = time::Now()
+  let method = raw_request.Method
+  let path = raw_request.URL.Path
+  defer {
+    match observers.complete {
+      observer => {
+        observer(
+          Completion{
+            method: method,
+            path: path,
+            status: record.status,
+            bytes: record.bytes,
+            duration: time::Since(started),
+          },
+        )
+      },
+      _ => (),
+    }
+  }
+  serve_http(
+    middleware_handlers,
+    routes,
+    fallback_handlers,
+    max_body_bytes,
+    observers,
+    record,
+    writer,
+    raw_request,
+  )
+}
+
 private fn serve_http(
   middleware_handlers: [Middleware],
   routes: [Route],
   fallback_handlers: FallbackHandlers,
   max_body_bytes: Int,
+  observers: Observers,
+  record: &mut DeliveryRecord,
   writer: http::ResponseWriter,
   raw_request: &mut http::Request,
 ) {
@@ -676,8 +1087,11 @@ private fn serve_http(
     deliver_http_response(
       writer,
       raw_request.Method,
+      raw_request.URL.Path,
       raw_request.Context(),
       finalize_response(raw_request.Method, payload_too_large()),
+      observers,
+      record,
     )
   } else {
     let limited_body = io::LimitReader(raw_request.Body, Int64::from(max_body_bytes) + 1)
@@ -688,8 +1102,11 @@ private fn serve_http(
           deliver_http_response(
             writer,
             raw_request.Method,
+            raw_request.URL.Path,
             raw_request.Context(),
             finalize_response(raw_request.Method, payload_too_large()),
+            observers,
+            record,
           )
         } else {
           let request = Request{
@@ -704,8 +1121,18 @@ private fn serve_http(
           deliver_http_response(
             writer,
             raw_request.Method,
+            raw_request.URL.Path,
             raw_request.Context(),
-            handle_bounded(middleware_handlers, routes, fallback_handlers, max_body_bytes, request),
+            handle_bounded(
+              middleware_handlers,
+              routes,
+              fallback_handlers,
+              max_body_bytes,
+              observers,
+              request,
+            ),
+            observers,
+            record,
           )
         }
       },
@@ -713,8 +1140,11 @@ private fn serve_http(
         deliver_http_response(
           writer,
           raw_request.Method,
+          raw_request.URL.Path,
           raw_request.Context(),
           finalize_response(raw_request.Method, bad_request()),
+          observers,
+          record,
         )
       },
     }
@@ -726,6 +1156,7 @@ private fn handle_bounded(
   routes: [Route],
   fallback_handlers: FallbackHandlers,
   max_body_bytes: Int,
+  observers: Observers,
   request: Request,
 ) Response {
   if request.body.size() > max_body_bytes {
@@ -733,7 +1164,7 @@ private fn handle_bounded(
   } else {
     finalize_safely(
       request.method,
-      handle_safely(middleware_handlers, routes, fallback_handlers, request),
+      handle_safely(middleware_handlers, routes, fallback_handlers, observers, request),
     )
   }
 }
@@ -751,13 +1182,28 @@ private fn handle_safely(
   middleware_handlers: [Middleware],
   routes: [Route],
   fallback_handlers: FallbackHandlers,
+  observers: Observers,
   request: Request,
 ) Response {
+  let trace = &mut PanicTrace{completed: false, stack: ""}
   match unsafe {
-    handle_request(middleware_handlers, routes, fallback_handlers, request)
+    trace_panics(trace, fn() {
+      handle_request(middleware_handlers, routes, fallback_handlers, request)
+    })
   } {
     ok(response) => response,
-    err(_) => internal_server_error(),
+    err(message) => {
+      report_panic(
+        observers,
+        Panic{
+          method: request.method,
+          path: request.path,
+          message: message,
+          stack: trace.stack,
+        },
+      )
+      internal_server_error()
+    },
   }
 }
 
@@ -1157,8 +1603,11 @@ private fn append_unique(values: [Str], value: Str) [Str] {
 private fn deliver_http_response(
   writer: http::ResponseWriter,
   method: Str,
+  path: Str,
   request_context_value: go_context::Context,
   response: Response,
+  observers: Observers,
+  record: &mut DeliveryRecord,
 ) {
   let state = response_state(response)
   if state.mode == ResponseMode::SSE and method != "HEAD" {
@@ -1168,9 +1617,17 @@ private fn deliver_http_response(
       state.context.or(request_context_value),
       response,
       state.sse_handler.expect("missing SSE handler"),
+      Panic{
+        method: method,
+        path: path,
+        message: "",
+        stack: "",
+      },
+      observers,
+      record,
     )
   } else {
-    write_http_response(writer, response)
+    write_http_response(writer, response, record)
   }
 }
 
@@ -1180,15 +1637,41 @@ private fn deliver_sse_response(
   request_context_value: go_context::Context,
   response: Response,
   handler: SSEHandler,
+  origin: Panic,
+  observers: Observers,
+  record: &mut DeliveryRecord,
 ) {
+  // The stream ends when the request or transport is cancelled, or when the
+  // serving `Server` starts draining.
+  let stream_context, cancel_stream = go_context::WithCancel(request_context_value)
+  defer cancel_stream()
+  let stop_transport = go_context::AfterFunc(transport_context, fn() {
+    cancel_stream()
+  })
+  defer stop_transport()
+  let stop_drain: fn() Bool = match drain_signal(transport_context) {
+    drain => {
+      go_context::AfterFunc(drain.context, fn() {
+        cancel_stream()
+      })
+    },
+    _ => {
+      fn() Bool {
+        false
+      }
+    },
+  }
+  defer stop_drain()
+
   let state = &mut EventStreamState{
     writer: writer,
-    context: request_context_value,
+    context: stream_context,
     transport_context: transport_context,
     status: response.status,
     headers: response.headers.clone(),
     committed: false,
     usable: true,
+    record: record,
   }
   let stream = &mut EventStream{store: state}
   let controller = http::NewResponseController(writer)
@@ -1196,17 +1679,29 @@ private fn deliver_sse_response(
     ok => (),
     err(_) => (),
   }
+  let trace = &mut PanicTrace{completed: false, stack: ""}
   match unsafe {
-    handler(stream)
-    commit_event_stream(stream)
+    trace_panics(trace, fn() {
+      handler(stream)
+      commit_event_stream(stream)
+    })
   } {
     ok(_) => { state.usable = false },
-    err(_) => {
+    err(message) => {
       state.usable = false
+      report_panic(
+        observers,
+        Panic{
+          method: origin.method,
+          path: origin.path,
+          message: message,
+          stack: trace.stack,
+        },
+      )
       if state.committed {
         panic(http::ErrAbortHandler)
       } else {
-        write_http_response(writer, finalize_response("GET", internal_server_error()))
+        write_http_response(writer, finalize_response("GET", internal_server_error()), record)
       }
     },
   }
@@ -1220,9 +1715,17 @@ private fn copy_http_headers(writer: http::ResponseWriter, headers: Headers) {
   }
 }
 
-private fn write_http_response(writer: http::ResponseWriter, response: Response) {
+private fn write_http_response(
+  writer: http::ResponseWriter,
+  response: Response,
+  record: &mut DeliveryRecord,
+) {
   copy_http_headers(writer, response.headers)
   writer.WriteHeader(response.status)
+  record.status = response.status
   mut body = response.body
-  writer.Write(&mut body)
+  match writer.Write(&mut body) {
+    ok(count) => { record.bytes = count },
+    err(_) => (),
+  }
 }

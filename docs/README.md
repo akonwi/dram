@@ -31,3 +31,4 @@ Common statuses are `Proposed`, `Accepted`, `Superseded`, and `Deprecated`. When
 - [0002: Establish Dram's Core HTTP Architecture](./adrs/0002-establish-core-http-architecture.md)
 - [0003: Use Opaque Middleware Continuations](./adrs/0003-use-indexed-middleware-dispatch.md)
 - [0004: Define Response Delivery and Commitment](./adrs/0004-define-response-delivery-and-commitment.md)
+- [0005: Add a Server Lifecycle and Observers](./adrs/0005-add-server-lifecycle-and-observers.md)
