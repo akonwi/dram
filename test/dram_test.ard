@@ -914,6 +914,8 @@ test fn sse_validates_fields_before_commitment() Void!Str {
 
 test fn sse_head_and_delivery_replacement_are_safe() Void!Str {
   let app = &mut dram::App::new()
+  // Default security headers would add nosniff; this checks SSE's own.
+  app.security_headers(enabled: false)
   app.use(fn(request, response, next) {
     next.run(request, response)
     if request.path == "/blocked" {

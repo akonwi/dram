@@ -1,0 +1,348 @@
+use ard/testing
+
+use dram/dram
+use go:net/http
+use go:net/http/httptest
+use go:strings
+
+fn serve(handler: http::Handler, method: Str, target: Str, headers: [Str: Str]) &mut httptest::ResponseRecorder {
+  let recorder = httptest::NewRecorder()
+  let request = httptest::NewRequest(method, target, strings::NewReader(""))
+  for name in headers.keys() {
+    request.Header.Set(name, headers.get(name).or(""))
+  }
+  handler.ServeHTTP(recorder, request)
+  recorder
+}
+
+fn browser_request(method: Str, path: Str, site: Str, origin: Str) dram::Request {
+  let request = &mut dram::Request::new(method, path)
+  request.host = Maybe::new("app.example")
+  if site != "" {
+    request.headers.set("Sec-Fetch-Site", site)
+  }
+  if origin != "" {
+    request.headers.set("Origin", origin)
+  }
+  request.*
+}
+
+fn has_default_headers(headers: dram::Headers) Bool {
+  headers.get("X-Content-Type-Options").or("") == "nosniff" and headers.get("X-Frame-Options").or("") == "SAMEORIGIN" and headers.get("Content-Security-Policy").or("") == "frame-ancestors 'self'" and headers.get("Referrer-Policy").or("") == "strict-origin-when-cross-origin" and headers.get("Strict-Transport-Security").is_none()
+}
+
+fn recorded_default_headers(recorder: &mut httptest::ResponseRecorder) Bool {
+  let headers = recorder.Header()
+  headers.Get("X-Content-Type-Options") == "nosniff" and headers.Get("X-Frame-Options") == "SAMEORIGIN" and headers.Get("Content-Security-Policy") == "frame-ancestors 'self'" and headers.Get("Referrer-Policy") == "strict-origin-when-cross-origin"
+}
+
+fn posting_app() &mut dram::App {
+  let app = &mut dram::App::new()
+  app.post("/login", fn(request, response) {
+    response.text(200, "signed in")
+  })
+  app.put("/items/:id", fn(request, response) {
+    response.text(200, "updated")
+  })
+  app.get("/page", fn(request, response) {
+    response.text(200, "page")
+  })
+  app
+}
+
+// Security headers on by default
+
+test fn security_headers_are_on_by_default() Void!Str {
+  let app = posting_app()
+  let page = app.handle(dram::Request::new("GET", "/page"))
+  try testing::assert(has_default_headers(page.headers), "route lacks default headers")
+  let missing = app.handle(dram::Request::new("GET", "/missing"))
+  try testing::assert(missing.status == 404 and has_default_headers(missing.headers), "404 lacks headers")
+  let wrong_method = app.handle(dram::Request::new("DELETE", "/page"))
+  try testing::assert(
+    wrong_method.status == 405 and has_default_headers(wrong_method.headers),
+    "405 lacks headers",
+  )
+  testing::pass()
+}
+
+test fn default_headers_cover_responses_dram_creates() Void!Str {
+  let app = &mut dram::App::new()
+  app.set_max_body_bytes(4)
+  app.post("/echo", fn(request, response) {
+    response.bytes(200, request.body)
+  })
+  app.get("/boom", fn(request, response) {
+    panic("boom")
+  })
+  app.on_panic(fn(report) {})
+  app.use(fn(request, response, next) {
+    if request.path == "/gate" {
+      response.text(401, "no")
+    } else {
+      next.run(request, response)
+    }
+  })
+  let too_large = serve(app.*, "POST", "/echo", ["Content-Type": "text/plain"])
+  try testing::assert(too_large.Code == 200, "small body status {too_large.Code}")
+  let handler: http::Handler = app.*
+  let recorder = httptest::NewRecorder()
+  let large = httptest::NewRequest("POST", "/echo", strings::NewReader("too large"))
+  handler.ServeHTTP(recorder, large)
+  try testing::assert(recorder.Code == 413 and recorded_default_headers(recorder), "413 lacks headers")
+  let boom = serve(app.*, "GET", "/boom", [:])
+  try testing::assert(boom.Code == 500 and recorded_default_headers(boom), "panic 500 lacks headers")
+  let gate = serve(app.*, "GET", "/gate", [:])
+  try testing::assert(gate.Code == 401 and recorded_default_headers(gate), "short-circuit lacks headers")
+  testing::pass()
+}
+
+test fn default_headers_cover_sse_and_negotiated_responses() Void!Str {
+  let app = &mut dram::App::new()
+  app.compress(min_bytes: 1)
+  app.get("/events", fn(request, response) {
+    response.sse(fn(events) {
+      events.send(data: "hi")
+    })
+  })
+  app.get("/doc", fn(request, response) {
+    response.headers.set("ETag", "\"v1\"")
+    response.text(200, strings::Repeat("doc ", 40))
+  })
+  let events = serve(app.*, "GET", "/events", [:])
+  try testing::assert(events.Header().Get("Content-Type") == "text/event-stream", "not SSE")
+  try testing::assert(recorded_default_headers(events), "SSE lacks headers")
+  try testing::assert(events.Header().Values("X-Content-Type-Options").size() == 1, "nosniff duplicated")
+  let gzipped = serve(app.*, "GET", "/doc", ["Accept-Encoding": "gzip"])
+  try testing::assert(
+    gzipped.Header().Get("Content-Encoding") == "gzip" and recorded_default_headers(gzipped),
+    "gzip lacks headers",
+  )
+  let cached = serve(app.*, "GET", "/doc", ["If-None-Match": "\"v1\""])
+  try testing::assert(cached.Code == 304 and recorded_default_headers(cached), "304 lacks headers")
+  testing::pass()
+}
+
+test fn app_security_headers_customize_and_disable() Void!Str {
+  let app = posting_app()
+  app.get("/own", fn(request, response) {
+    response.headers.set("Content-Security-Policy", "default-src 'none'")
+    response.text(200, "own")
+  })
+  app.security_headers(
+    frame: dram::Framing::deny,
+    csp: "default-src 'self'",
+    referrer_policy: "no-referrer",
+    hsts_max_age: 600,
+  )
+  let page = app.handle(dram::Request::new("GET", "/page"))
+  try testing::assert(page.headers.get("X-Frame-Options").or("") == "DENY", "custom frame")
+  try testing::assert(
+    page.headers.get("Content-Security-Policy").or("") == "default-src 'self'; frame-ancestors 'none'",
+    "custom CSP: {page.headers.get("Content-Security-Policy").or("")}",
+  )
+  try testing::assert(page.headers.get("Referrer-Policy").or("") == "no-referrer", "custom referrer")
+  try testing::assert(
+    page.headers.get("Strict-Transport-Security").or("") == "max-age=600",
+    "custom HSTS",
+  )
+  let own = app.handle(dram::Request::new("GET", "/own"))
+  try testing::assert(
+    own.headers.get("Content-Security-Policy").or("") == "default-src 'none'",
+    "handler CSP replaced",
+  )
+
+  app.security_headers(enabled: false)
+  let off = app.handle(dram::Request::new("GET", "/page"))
+  for name in ["X-Content-Type-Options", "X-Frame-Options", "Content-Security-Policy", "Referrer-Policy"] {
+    try testing::assert(off.headers.get(name).is_none(), "disabled policy still sent {name}")
+  }
+  testing::pass()
+}
+
+test fn middleware_policies_override_the_app_default() Void!Str {
+  let app = &mut dram::App::new()
+  app.get("/page", fn(request, response) {
+    response.text(200, "page")
+  })
+  let embed = &mut app.group("/embed")
+  embed.use(dram::security_headers(frame: dram::Framing::allow, referrer_policy: ""))
+  embed.get("/widget", fn(request, response) {
+    response.text(200, "widget")
+  })
+  let page = app.handle(dram::Request::new("GET", "/page"))
+  try testing::assert(has_default_headers(page.headers), "default missing outside the group")
+  let widget = app.handle(dram::Request::new("GET", "/embed/widget"))
+  try testing::assert(widget.headers.get("X-Frame-Options").is_none(), "app default re-added XFO")
+  try testing::assert(widget.headers.get("Content-Security-Policy").is_none(), "app default re-added CSP")
+  try testing::assert(widget.headers.get("Referrer-Policy").is_none(), "app default re-added referrer")
+  try testing::assert(widget.headers.get("X-Content-Type-Options").or("") == "nosniff", "group nosniff")
+  testing::pass()
+}
+
+// Cross-origin protection on by default
+
+test fn safe_methods_and_non_browser_requests_pass() Void!Str {
+  let app = posting_app()
+  for method in ["GET", "HEAD", "OPTIONS"] {
+    let response = app.handle(
+      browser_request(method, "/page", "cross-site", "https://evil.example"),
+    )
+    try testing::assert(response.status != 403, "{method} was rejected")
+  }
+  let plain = app.handle(dram::Request::new("POST", "/login"))
+  try testing::assert(plain.status == 200, "non-browser POST rejected: {plain.status}")
+  let curl = serve(app.*, "POST", "/login", [:])
+  try testing::assert(curl.Code == 200, "HTTP POST without metadata rejected")
+  testing::pass()
+}
+
+test fn fetch_metadata_decides_for_modern_browsers() Void!Str {
+  let app = posting_app()
+  let same_origin = app.handle(
+    browser_request("POST", "/login", "same-origin", "https://app.example"),
+  )
+  try testing::assert(same_origin.status == 200, "same-origin rejected")
+  let typed = app.handle(browser_request("POST", "/login", "none", ""))
+  try testing::assert(typed.status == 200, "user-initiated (none) rejected")
+  for site in ["cross-site", "same-site", "Cross-Site", "bogus"] {
+    let rejected = app.handle(browser_request("POST", "/login", site, "https://app.example"))
+    try testing::assert(rejected.status == 403, "{site} POST accepted: {rejected.status}")
+  }
+  for method in ["PUT", "PATCH", "DELETE"] {
+    let rejected = app.handle(
+      browser_request(method, "/items/1", "cross-site", "https://evil.example"),
+    )
+    try testing::assert(rejected.status == 403, "cross-site {method} accepted")
+  }
+  testing::pass()
+}
+
+test fn origin_is_compared_with_host_without_fetch_metadata() Void!Str {
+  let app = posting_app()
+  let matching = app.handle(browser_request("POST", "/login", "", "https://APP.example"))
+  try testing::assert(matching.status == 200, "matching Origin rejected")
+  for origin in ["https://evil.example", "https://app.example:8443", "null", "not a url", "https://sub.app.example"] {
+    let rejected = app.handle(browser_request("POST", "/login", "", origin))
+    try testing::assert(rejected.status == 403, "Origin {origin} accepted")
+  }
+  let no_host = &mut dram::Request::new("POST", "/login")
+  no_host.headers.set("Origin", "https://app.example")
+  try testing::assert(app.handle(no_host.*).status == 403, "Origin accepted without a request host")
+  testing::pass()
+}
+
+test fn rejection_is_a_plain_403_before_middleware_and_handlers() Void!Str {
+  let app = posting_app()
+  app.use(fn(request, response, next) {
+    response.headers.set("X-Ran", "yes")
+    next.run(request, response)
+  })
+  let rejected = app.handle(browser_request("POST", "/login", "cross-site", "https://evil.example"))
+  try testing::assert(rejected.status == 403, "not 403")
+  try testing::assert(
+    Str::from(rejected.body) == "Forbidden: cross-origin request",
+    "body {Str::from(rejected.body)}",
+  )
+  try testing::assert(rejected.headers.get("X-Ran").is_none(), "middleware ran for a rejected request")
+  try testing::assert(has_default_headers(rejected.headers), "403 lacks security headers")
+  let unknown = app.handle(
+    browser_request("POST", "/missing", "cross-site", "https://evil.example"),
+  )
+  try testing::assert(unknown.status == 403, "unrouted cross-site POST got {unknown.status}")
+
+  let over_http = serve(
+    app.*,
+    "POST",
+    "/login",
+    ["Sec-Fetch-Site": "cross-site", "Origin": "https://evil.example"],
+  )
+  try testing::assert(over_http.Code == 403, "HTTP cross-site POST accepted")
+  let same_host = serve(app.*, "POST", "/login", ["Origin": "http://example.com"])
+  try testing::assert(same_host.Code == 200, "Origin matching the HTTP Host rejected: {same_host.Code}")
+  testing::pass()
+}
+
+test fn trusted_origins_and_opting_out() Void!Str {
+  let app = posting_app()
+  app.cross_origin_protection(
+    trusted_origins: ["https://Accounts.Example.com", "http://localhost:5173"],
+  )
+  let trusted = app.handle(
+    browser_request("POST", "/login", "cross-site", "https://accounts.example.com"),
+  )
+  try testing::assert(trusted.status == 200, "trusted origin rejected")
+  let dev = app.handle(browser_request("POST", "/login", "", "http://localhost:5173"))
+  try testing::assert(dev.status == 200, "trusted origin without metadata rejected")
+  let other = app.handle(
+    browser_request("POST", "/login", "cross-site", "https://accounts.example.com:444"),
+  )
+  try testing::assert(other.status == 403, "untrusted port accepted")
+
+  for origin in [
+    "accounts.example.com",
+    "https://a.example/",
+    "https://a.example/path",
+    "https://a.example?x=1",
+    "https://u@a.example",
+    "https://",
+    "",
+    "https://a.example?",
+    "https://a.example#",
+  ] {
+    let invalid = unsafe {
+      app.cross_origin_protection(trusted_origins: [origin])
+    }
+    try testing::assert(invalid.is_err(), "invalid trusted origin accepted: {origin}")
+  }
+
+  app.cross_origin_protection(enabled: false)
+  let off = app.handle(browser_request("POST", "/login", "cross-site", "https://evil.example"))
+  try testing::assert(off.status == 200, "disabled protection still rejected")
+  testing::pass()
+}
+
+test fn groups_can_allow_cross_origin_requests() Void!Str {
+  let app = &mut dram::App::new()
+  let hooks = &mut app.group("/hooks")
+  hooks.post("/before", fn(request, response) {
+    response.text(200, "before")
+  })
+  hooks.allow_cross_origin()
+  hooks.post("/payment", fn(request, response) {
+    response.text(200, "paid")
+  })
+  let nested = &mut hooks.group("/v2")
+  nested.post("/payment", fn(request, response) {
+    response.text(200, "paid v2")
+  })
+  app.post("/login", fn(request, response) {
+    response.text(200, "signed in")
+  })
+  let allowed = app.handle(
+    browser_request("POST", "/hooks/payment", "cross-site", "https://pay.example"),
+  )
+  try testing::assert(allowed.status == 200, "allowed group rejected")
+  let child = app.handle(
+    browser_request("POST", "/hooks/v2/payment", "cross-site", "https://pay.example"),
+  )
+  try testing::assert(child.status == 200, "child group did not inherit")
+  let earlier = app.handle(
+    browser_request("POST", "/hooks/before", "cross-site", "https://pay.example"),
+  )
+  try testing::assert(earlier.status == 403, "route registered before allow_cross_origin was exempted")
+  let elsewhere = app.handle(browser_request("POST", "/login", "cross-site", "https://pay.example"))
+  try testing::assert(elsewhere.status == 403, "exemption leaked outside the group")
+  testing::pass()
+}
+
+test fn network_requests_carry_their_host() Void!Str {
+  let app = &mut dram::App::new()
+  app.get("/host", fn(request, response) {
+    response.text(200, request.host.or("none"))
+  })
+  let response = serve(app.*, "GET", "/host", [:])
+  try testing::assert(response.Body.String() == "example.com", "host {response.Body.String()}")
+  try testing::assert(dram::Request::new("GET", "/").host.is_none(), "Request::new has a host")
+  testing::pass()
+}

@@ -12,7 +12,8 @@ The package root provides Dram's HTTP foundation:
 - static, `:name`, and final-segment `*name` routes, nested route groups, and customizable 404/405 responses;
 - in-memory `App.handle(Request)` dispatch;
 - buffered text and byte responses plus deferred server-sent event streams;
-- cookie reading and writing with safe defaults, local-by-default redirects, and opt-in security headers;
+- cookie reading and writing with safe defaults and local-by-default redirects;
+- security headers and cross-origin (CSRF) request protection, on by default;
 - automatic conditional `GET` (304) for responses with an `ETag`, and opt-in gzip compression;
 - case-insensitive, multi-value headers;
 - bounded request bodies with a 1 MiB default;
@@ -168,7 +169,7 @@ let tags = request.query_list("tag")
 let request = dram::Request::new("GET", "/search?q=ard")
 ```
 
-Callers that need custom headers, bodies, or initial contexts may instantiate `Request` directly. Initialize `path_params` as empty; the router replaces it when selecting a parameterized route.
+Callers that need custom headers, bodies, or initial contexts may instantiate `Request` directly. Initialize `path_params` as empty; the router replaces it when selecting a parameterized route. `request.host` is the `Host` the client addressed (`Str?`; Go removes it from the headers), set for network requests and none for `Request::new`.
 
 ## Context API
 
@@ -259,25 +260,57 @@ response.redirect("https://accounts.example.com/oauth", status: 302, external: t
 
 ### Security headers
 
-`dram::security_headers()` is opt-in middleware for defensive headers. Register it first: it runs the rest of the chain, then adds each header only if the response doesn't already have one, so handlers can override any of them.
+Every response gets defensive headers by default. Each is added only if the response doesn't already have it, so a handler can always send its own:
 
-```ard
-app.use(dram::security_headers())
-// X-Content-Type-Options: nosniff
-// X-Frame-Options: SAMEORIGIN
-// Content-Security-Policy: frame-ancestors 'self'
-// Referrer-Policy: strict-origin-when-cross-origin
-
-app.use(dram::security_headers(
-  frame: dram::Framing::deny,                // DENY / frame-ancestors 'none'; Framing::allow sends neither
-  csp: "default-src 'self'",                 // frame-ancestors appended unless present
-  referrer_policy: "no-referrer",            // "" omits the header
-  hsts_max_age: 31_536_000,                  // off by default; only meaningful over HTTPS
-  hsts_include_subdomains: true,
-))
+```
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+Content-Security-Policy: frame-ancestors 'self'
+Referrer-Policy: strict-origin-when-cross-origin
 ```
 
-Groups can use a different policy, for example `Framing::allow` for embeddable pages. When several apply to a request, the innermost decides and outer ones add nothing. The headers also apply to event streams, gzip responses, and 304s. They are not added to the 400 and 413 responses Dram returns before dispatch, or to the generic 500 after a panic.
+They are applied at delivery, so they cover every response: handlers, fallbacks, short-circuiting middleware, event streams, gzip and 304 responses, and the 400, 413, and 500 responses Dram creates itself. `app.security_headers(...)` replaces the app's policy:
+
+```ard
+app.security_headers(
+  frame: dram::Framing::deny,      // DENY / frame-ancestors 'none'; Framing::allow sends neither
+  csp: "default-src 'self'",       // frame-ancestors appended unless present
+  referrer_policy: "no-referrer",  // "" omits the header
+  hsts_max_age: 31_536_000,        // off by default; only meaningful over HTTPS
+  hsts_include_subdomains: true,
+)
+app.security_headers(enabled: false)  // none at all
+```
+
+For part of an app, use the `dram::security_headers(...)` middleware, which takes the same options. A response it handles is left alone by the app's policy, and when several apply to one request, the innermost decides:
+
+```ard
+let embed = &mut app.group("/embed")
+embed.use(dram::security_headers(frame: dram::Framing::allow))  // embeddable pages
+```
+
+### Cross-origin request protection
+
+Dram rejects cross-origin browser requests that could change state, the attack known as cross-site request forgery (CSRF), by default. It follows Go's `http.CrossOriginProtection`, using headers browsers send rather than tokens:
+
+- `GET`, `HEAD`, and `OPTIONS` always pass. They must not change state.
+- Other methods pass when `Sec-Fetch-Site` is `same-origin` or `none` (typed into the address bar). `cross-site` and `same-site` (a sibling subdomain) are rejected.
+- Without `Sec-Fetch-Site`, from older browsers, the `Origin` host must equal `request.host`.
+- Requests with neither header pass. They are not from a browser (curl, server-to-server calls, webhooks), and CSRF needs a browser.
+
+A rejected request gets `403 Forbidden: cross-origin request` after route matching, which finds any exemption, and before middleware or handlers run. Allow specific origins, exempt a group, or opt out:
+
+```ard
+app.cross_origin_protection(trusted_origins: ["https://accounts.example.com"])  // scheme://host[:port]
+
+let hooks = &mut app.group("/hooks")
+hooks.allow_cross_origin()  // routes registered on it afterwards, and groups created from it
+hooks.post("/payment", handle_payment)
+
+app.cross_origin_protection(enabled: false)
+```
+
+Behind a proxy that rewrites `Host`, browsers without `Sec-Fetch-Site` (pre-2023) are rejected unless their origin is trusted.
 
 ### Conditional requests and compression
 

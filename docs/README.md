@@ -34,3 +34,4 @@ Common statuses are `Proposed`, `Accepted`, `Superseded`, and `Deprecated`. When
 - [0005: Add a Server Lifecycle and Observers](./adrs/0005-add-server-lifecycle-and-observers.md)
 - [0006: Negotiate Representations at Delivery](./adrs/0006-negotiate-representations-at-delivery.md)
 - [0007: Add Cookie, Redirect, and Security Header Helpers](./adrs/0007-add-cookie-redirect-and-security-header-helpers.md)
+- [0008: Secure Responses and Requests by Default](./adrs/0008-secure-responses-and-requests-by-default.md)

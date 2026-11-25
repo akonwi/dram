@@ -41,6 +41,14 @@ code="$(curl -sS -D "$headers" -o "$body" -w '%{http_code}' -X POST 'http://127.
 [[ "$code" == "303" ]]
 [[ "$(grep -i '^Location:' "$headers" | tr -d '\r')" == "Location: /" ]]
 
+# Cross-origin protection is on by default.
+code="$(curl -sS -o "$body" -w '%{http_code}' -X POST -H 'Sec-Fetch-Site: cross-site' -H 'Origin: https://evil.example' http://127.0.0.1:8080/go)"
+[[ "$code" == "403" ]]
+code="$(curl -sS -o "$body" -w '%{http_code}' -X POST -H 'Origin: http://127.0.0.1:8080' http://127.0.0.1:8080/go)"
+[[ "$code" == "303" ]]
+code="$(curl -sS -o "$body" -w '%{http_code}' -X POST -H 'Sec-Fetch-Site: same-origin' http://127.0.0.1:8080/go)"
+[[ "$code" == "303" ]]
+
 head_size="$(curl -sS -I -o /dev/null -w '%{size_download}' http://127.0.0.1:8080/)"
 [[ "$head_size" == "0" ]]
 

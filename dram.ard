@@ -87,6 +87,9 @@ struct Request {
   body: [Byte],
   context: go_context::Context,
   path_params: [Str: Str],
+  // The `Host` the client addressed (Go removes it from the headers).
+  // Set for network requests; none for `Request::new`.
+  host: Str?,
 }
 
 fn Request::new(method: Str, path: Str) Request {
@@ -147,6 +150,7 @@ impl Request {
       body: self.body,
       context: context,
       path_params: self.path_params,
+      host: self.host,
     }
   }
 
@@ -190,6 +194,8 @@ private struct ServeOptions {
   panic: PanicObserver?,
   complete: CompletionObserver?,
   compression: Compression?,
+  security: Headers?,
+  cross_origin: CrossOrigin?,
 }
 
 // Report a recovered panic to the observer, or to stderr without one.
@@ -508,6 +514,24 @@ fn security_headers(
   hsts_max_age: Int?,
   hsts_include_subdomains: Bool?,
 ) Middleware {
+  let fixed = security_policy(frame, referrer_policy, csp, hsts_max_age, hsts_include_subdomains)
+  fn(request: Request, response: &mut Response, next: Next) {
+    next.run(request, response)
+    let state = response_state(response.*)
+    if not state.secured.or(false) {
+      state.secured = Maybe::new(true)
+      fill_headers(response, fixed)
+    }
+  }
+}
+
+private fn security_policy(
+  frame: Framing?,
+  referrer_policy: Str?,
+  csp: Str?,
+  hsts_max_age: Int?,
+  hsts_include_subdomains: Bool?,
+) Headers {
   let framing = frame.or(Framing::same_origin)
   let defaults = &mut Headers::new()
   defaults.set("X-Content-Type-Options", "nosniff")
@@ -548,19 +572,130 @@ fn security_headers(
     },
     _ => (),
   }
-  let fixed = defaults.clone()
-  fn(request: Request, response: &mut Response, next: Next) {
-    next.run(request, response)
-    let state = response_state(response.*)
-    if not state.secured.or(false) {
-      state.secured = Maybe::new(true)
-      for name in fixed.names() {
-        if response.headers.get(name).is_none() {
-          response.headers.set(name, fixed.get(name).or(""))
-        }
-      }
+  defaults.clone()
+}
+
+private fn fill_headers(response: &mut Response, fixed: Headers) {
+  for name in fixed.names() {
+    if response.headers.get(name).is_none() {
+      response.headers.set(name, fixed.get(name).or(""))
     }
   }
+}
+
+// The app-level security header policy, applied at delivery to every
+// response that no `security_headers` middleware has handled.
+private fn apply_security_defaults(response: Response, options: ServeOptions) Response {
+  match options.security {
+    fixed => {
+      mut response = response
+      let secured = &mut response
+      if not response_state(response).secured.or(false) {
+        fill_headers(secured, fixed)
+      }
+      secured.*
+    },
+    _ => response,
+  }
+}
+
+private struct SecuritySettings {
+  enabled: Bool,
+  headers: Headers,
+}
+
+private fn security_settings(stored: Any?) Headers? {
+  match stored {
+    boxed => {
+      let settings = unsafe::cast<SecuritySettings>(
+        boxed,
+      ).expect("invalid internal security settings")
+      match settings.enabled {
+        true => Maybe::new(settings.headers),
+        false => Maybe::new(),
+      }
+    },
+    _ => {
+      Maybe::new(
+        security_policy(Maybe::new(), Maybe::new(), Maybe::new(), Maybe::new(), Maybe::new()),
+      )
+    },
+  }
+}
+
+private struct CrossOrigin {
+  enabled: Bool,
+  trusted: [Str],
+}
+
+private fn cross_origin_settings(stored: Any?) CrossOrigin? {
+  match stored {
+    boxed => {
+      let settings = unsafe::cast<CrossOrigin>(
+        boxed,
+      ).expect("invalid internal cross-origin settings")
+      match settings.enabled {
+        true => Maybe::new(settings),
+        false => Maybe::new(),
+      }
+    },
+    _ => Maybe::new(CrossOrigin{enabled: true, trusted: []}),
+  }
+}
+
+// Go's `http.CrossOriginProtection` check: unsafe browser requests must be
+// same-origin (by `Sec-Fetch-Site`, else by `Origin` against the request
+// host) or come from a trusted origin. Requests without either header are
+// not from a browser and pass.
+private fn cross_origin_rejected(request: Request, settings: CrossOrigin) Bool {
+  let method = request.method
+  if method == "GET" or method == "HEAD" or method == "OPTIONS" {
+    false
+  } else {
+    let site = strings::ToLower(strings::TrimSpace(request.headers.get("Sec-Fetch-Site").or("")))
+    let origin = request.headers.get("Origin").or("")
+    if site == "same-origin" or site == "none" {
+      false
+    } else if site != "" {
+      not origin_trusted(origin, settings)
+    } else if origin == "" {
+      false
+    } else if origin_host(origin) != "" and strings::EqualFold(origin_host(origin), request.host.or("")) {
+      false
+    } else {
+      not origin_trusted(origin, settings)
+    }
+  }
+}
+
+private fn origin_host(origin: Str) Str {
+  match url::Parse(origin) {
+    ok(parsed) => parsed.Host,
+    err(_) => "",
+  }
+}
+
+private fn origin_trusted(origin: Str, settings: CrossOrigin) Bool {
+  list_contains(settings.trusted, strings::ToLower(strings::TrimSpace(origin)))
+}
+
+private fn normalize_trusted_origin(origin: Str) Str {
+  let invalid = "trusted origin must be scheme://host[:port] with no path, query, or fragment: {strconv::Quote(origin)}"
+  match url::Parse(origin) {
+    ok(parsed) => {
+      if parsed.Scheme == "" or parsed.Host == "" or parsed.Path != "" or parsed.Opaque != "" or strings::ContainsAny(origin, "?#@") {
+        panic(invalid)
+      }
+      strings::ToLower(origin)
+    },
+    err(_) => panic(invalid),
+  }
+}
+
+private fn forbidden_cross_origin() Response {
+  let response = &mut Response::new()
+  response.text(403, "Forbidden: cross-origin request")
+  response.*
 }
 
 private fn has_csp_directive(policy: Str, name: Str) Bool {
@@ -765,6 +900,7 @@ struct Route {
   segments: [RouteSegment],
   middleware_handlers: [Middleware],
   handler: Handler,
+  allow_cross_origin: Bool?,
 }
 
 struct App {
@@ -776,6 +912,8 @@ struct App {
   _panic_observer: PanicObserver?,
   _completion_observer: CompletionObserver?,
   _compression: Any?,
+  _security: Any?,
+  _cross_origin: Any?,
 }
 
 private struct FallbackHandlers {
@@ -793,6 +931,8 @@ impl http::Handler for App {
       panic: self._panic_observer,
       complete: self._completion_observer,
       compression: compression_settings(self._compression),
+      security: security_settings(self._security),
+      cross_origin: cross_origin_settings(self._cross_origin),
     }
     serve_observed(
       self.middleware_handlers,
@@ -818,6 +958,8 @@ fn App::new() App {
     _panic_observer: Maybe::new(),
     _completion_observer: Maybe::new(),
     _compression: Maybe::new(),
+    _security: Maybe::new(),
+    _cross_origin: Maybe::new(),
   }
 }
 
@@ -876,8 +1018,38 @@ impl App {
     )
   }
 
+  // Replace the app's security header policy, applied at delivery to every
+  // response that no `security_headers` middleware handled. On by default
+  // with the defaults below; `enabled: false` turns it off.
+  fn mut security_headers(
+    frame: Framing?,
+    referrer_policy: Str?,
+    csp: Str?,
+    hsts_max_age: Int?,
+    hsts_include_subdomains: Bool?,
+    enabled: Bool?,
+  ) {
+    self._security = Maybe::new<Any>(
+      SecuritySettings{
+        enabled: enabled.or(true),
+        headers: security_policy(frame, referrer_policy, csp, hsts_max_age, hsts_include_subdomains),
+      },
+    )
+  }
+
+  // Replace the cross-origin request protection settings. On by default
+  // with no trusted origins; `enabled: false` turns it off. Trusted origins
+  // are `scheme://host[:port]`.
+  fn mut cross_origin_protection(trusted_origins: [Str]?, enabled: Bool?) {
+    let trusted: &mut [Str] = &mut []
+    for origin in trusted_origins.or([]) {
+      trusted.push(normalize_trusted_origin(origin))
+    }
+    self._cross_origin = Maybe::new<Any>(CrossOrigin{enabled: enabled.or(true), trusted: trusted.*})
+  }
+
   fn mut route(method: Str, path: Str, handler: Handler) {
-    register_route(self, method, path, [], handler)
+    register_route(self, method, path, [], false, handler)
   }
 
   fn mut group(prefix: Str) Group {
@@ -886,6 +1058,7 @@ impl App {
       _app: self,
       _prefix: prefix,
       _middleware_handlers: [],
+      _allow_cross_origin: Maybe::new(false),
     }
   }
 
@@ -935,6 +1108,8 @@ impl App {
         panic: self._panic_observer,
         complete: Maybe::new(),
         compression: compression_settings(self._compression),
+        security: security_settings(self._security),
+        cross_origin: cross_origin_settings(self._cross_origin),
       },
       request,
     )
@@ -1029,6 +1204,8 @@ private fn snapshot_app(app: App) App {
     _panic_observer: app._panic_observer,
     _completion_observer: app._completion_observer,
     _compression: app._compression,
+    _security: app._security,
+    _cross_origin: app._cross_origin,
   }
 }
 
@@ -1201,6 +1378,7 @@ struct Group {
   _app: &mut App,
   _prefix: Str,
   _middleware_handlers: [Middleware],
+  _allow_cross_origin: Bool?,
 }
 
 impl Group {
@@ -1216,7 +1394,15 @@ impl Group {
       _app: self._app,
       _prefix: join_group_prefix(self._prefix, prefix),
       _middleware_handlers: copy_middleware(self._middleware_handlers),
+      _allow_cross_origin: self._allow_cross_origin,
     }
+  }
+
+  // Exempt routes registered on this group afterwards, and groups created
+  // from it afterwards, from cross-origin request protection, e.g. for
+  // endpoints that legitimately receive cross-site browser form posts.
+  fn mut allow_cross_origin() {
+    self._allow_cross_origin = Maybe::new(true)
   }
 
   fn mut route(method: Str, path: Str, handler: Handler) {
@@ -1226,6 +1412,7 @@ impl Group {
       method,
       join_group_route(self._prefix, path),
       self._middleware_handlers,
+      self._allow_cross_origin.or(false),
       handler,
     )
   }
@@ -1268,6 +1455,7 @@ private fn register_route(
   method: Str,
   path: Str,
   middleware_handlers: [Middleware],
+  allow_cross_origin: Bool,
   handler: Handler,
 ) {
   validate_route(method, path)
@@ -1288,6 +1476,7 @@ private fn register_route(
       segments: segments,
       middleware_handlers: copy_middleware(middleware_handlers),
       handler: handler,
+      allow_cross_origin: Maybe::new(allow_cross_origin),
     },
   )
 }
@@ -1409,7 +1598,7 @@ private fn serve_http(
       raw_request.Method,
       raw_request.URL.Path,
       raw_request.Context(),
-      finalize_response(raw_request.Method, payload_too_large()),
+      finalize_response(raw_request.Method, apply_security_defaults(payload_too_large(), options)),
       options,
       record,
     )
@@ -1424,7 +1613,10 @@ private fn serve_http(
             raw_request.Method,
             raw_request.URL.Path,
             raw_request.Context(),
-            finalize_response(raw_request.Method, payload_too_large()),
+            finalize_response(
+              raw_request.Method,
+              apply_security_defaults(payload_too_large(), options),
+            ),
             options,
             record,
           )
@@ -1437,6 +1629,7 @@ private fn serve_http(
             body: body,
             context: raw_request.Context(),
             path_params: [:],
+            host: Maybe::new(raw_request.Host),
           }
           deliver_http_response(
             writer,
@@ -1462,7 +1655,7 @@ private fn serve_http(
           raw_request.Method,
           raw_request.URL.Path,
           raw_request.Context(),
-          finalize_response(raw_request.Method, bad_request()),
+          finalize_response(raw_request.Method, apply_security_defaults(bad_request(), options)),
           options,
           record,
         )
@@ -1480,14 +1673,19 @@ private fn handle_bounded(
   request: Request,
 ) Response {
   if request.body.size() > max_body_bytes {
-    finalize_safely(request.method, payload_too_large())
+    finalize_safely(request.method, apply_security_defaults(payload_too_large(), options))
   } else {
     let response = handle_safely(middleware_handlers, routes, fallback_handlers, options, request)
     match unsafe {
-      finalize_response(request.method, negotiate(request, response, options.compression))
+      finalize_response(
+        request.method,
+        negotiate(request, apply_security_defaults(response, options), options.compression),
+      )
     } {
       ok(finalized) => finalized,
-      err(_) => finalize_response(request.method, internal_server_error()),
+      err(_) => {
+        finalize_response(request.method, apply_security_defaults(internal_server_error(), options))
+      },
     }
   }
 }
@@ -1730,7 +1928,7 @@ private fn handle_safely(
   let trace = &mut PanicTrace{completed: false, stack: ""}
   match unsafe {
     trace_panics(trace, fn() {
-      handle_request(middleware_handlers, routes, fallback_handlers, request)
+      handle_request(middleware_handlers, routes, fallback_handlers, options.cross_origin, request)
     })
   } {
     ok(response) => response,
@@ -1753,6 +1951,7 @@ private fn handle_request(
   middleware_handlers: [Middleware],
   routes: [Route],
   fallback_handlers: FallbackHandlers,
+  cross_origin: CrossOrigin?,
   request: Request,
 ) Response {
   mut request = request
@@ -1807,10 +2006,24 @@ private fn handle_request(
     selected_handler = fallback_handlers.not_found
   }
 
-  let routed_request = &mut request
-  routed_request.path_params = route_params
-  dispatch(selected_middleware.*, 0, selected_handler, routed_request.*, response)
-  response.*
+  mut exempt = false
+  if route_index >= 0 {
+    exempt = routes.at(
+      route_index,
+    ).expect("matched route index is in bounds").allow_cross_origin.or(false)
+  }
+  let rejected = match cross_origin {
+    settings => (not exempt) and cross_origin_rejected(request, settings),
+    _ => false,
+  }
+  if rejected {
+    forbidden_cross_origin()
+  } else {
+    let routed_request = &mut request
+    routed_request.path_params = route_params
+    dispatch(selected_middleware.*, 0, selected_handler, routed_request.*, response)
+    response.*
+  }
 }
 
 private fn dispatch(
@@ -2243,7 +2456,11 @@ private fn deliver_sse_response(
       if state.committed {
         panic(http::ErrAbortHandler)
       } else {
-        write_http_response(writer, finalize_response("GET", internal_server_error()), record)
+        write_http_response(
+          writer,
+          finalize_response("GET", apply_security_defaults(internal_server_error(), options)),
+          record,
+        )
       }
     },
   }

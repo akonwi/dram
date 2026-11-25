@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted. Security headers amended by [0008](./0008-secure-responses-and-requests-by-default.md): they are now on by default at the app level, and the middleware remains for groups.
 
 ## Context
 
