@@ -210,7 +210,12 @@ test fn catch_all_params_capture_the_remaining_path() Void!Str {
   let root = app.handle(dram::Request::new("GET", "/files/"))
   try testing::assert(Str::from(root.body) == "/", "empty catch-all remainder changed")
   let prefix = app.handle(dram::Request::new("GET", "/files"))
-  try testing::assert(prefix.status == 404, "catch-all matched without its slash")
+  try testing::assert(prefix.status == 308, "catch-all prefix did not redirect")
+  try testing::assert(
+    prefix.headers.get("Location").or("") == "/files/",
+    "catch-all prefix redirect target changed",
+  )
+  try testing::assert(Str::from(prefix.body) == "", "catch-all matched without its slash")
   let other_method = app.handle(dram::Request::new("POST", "/files/archive.zip"))
   try testing::assert(other_method.status == 201, "catch-all pattern conflicted across methods")
   try testing::assert(Str::from(other_method.body) == "/archive.zip", "POST catch-all capture changed")

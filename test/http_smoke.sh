@@ -65,6 +65,19 @@ code="$(curl -sS -o "$body" -w '%{http_code}' http://127.0.0.1:8080/files/images
 [[ "$code" == "200" ]]
 [[ "$(cat "$body")" == "/images/logo.png" ]]
 
+# A path that matches no route redirects to its other trailing-slash form.
+code="$(curl -sS -D "$headers" -o "$body" -w '%{http_code}' http://127.0.0.1:8080/files)"
+[[ "$code" == "308" ]]
+[[ "$(grep -i '^Location:' "$headers" | tr -d '\r')" == "Location: /files/" ]]
+code="$(curl -sS -D "$headers" -o "$body" -w '%{http_code}' 'http://127.0.0.1:8080/search/?q=hello+world')"
+[[ "$code" == "308" ]]
+[[ "$(grep -i '^Location:' "$headers" | tr -d '\r')" == "Location: /search?q=hello+world" ]]
+code="$(curl -sS -L -o "$body" -w '%{http_code}' 'http://127.0.0.1:8080/search/?q=hello+world')"
+[[ "$code" == "200" ]]
+[[ "$(cat "$body")" == "hello world" ]]
+code="$(curl -sS -D "$headers" -o "$body" -w '%{http_code}' 'http://127.0.0.1:8080//evil.example/')"
+[[ "$code" == "404" ]]
+
 code="$(curl -sS -o "$body" -w '%{http_code}' http://127.0.0.1:8080/missing)"
 [[ "$code" == "404" ]]
 [[ "$(cat "$body")" == "Not Found: /missing" ]]

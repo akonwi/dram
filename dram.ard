@@ -196,6 +196,7 @@ private struct ServeOptions {
   compression: Compression?,
   security: Headers?,
   cross_origin: CrossOrigin?,
+  redirect_trailing_slash: Bool,
 }
 
 // Report a recovered panic to the observer, or to stderr without one.
@@ -914,6 +915,7 @@ struct App {
   _compression: Any?,
   _security: Any?,
   _cross_origin: Any?,
+  _redirect_trailing_slash: Bool?,
 }
 
 private struct FallbackHandlers {
@@ -933,6 +935,7 @@ impl http::Handler for App {
       compression: compression_settings(self._compression),
       security: security_settings(self._security),
       cross_origin: cross_origin_settings(self._cross_origin),
+      redirect_trailing_slash: self._redirect_trailing_slash.or(true),
     }
     serve_observed(
       self.middleware_handlers,
@@ -960,6 +963,7 @@ fn App::new() App {
     _compression: Maybe::new(),
     _security: Maybe::new(),
     _cross_origin: Maybe::new(),
+    _redirect_trailing_slash: Maybe::new(true),
   }
 }
 
@@ -1048,6 +1052,14 @@ impl App {
     self._cross_origin = Maybe::new<Any>(CrossOrigin{enabled: enabled.or(true), trusted: trusted.*})
   }
 
+  // Redirect a request whose path matches no route to the same path with
+  // its trailing slash added or removed, when that path has a route for the
+  // request's method. The redirect is a 308 that keeps the query string.
+  // On by default; `enabled: false` restores exact matching.
+  fn mut redirect_trailing_slash(enabled: Bool?) {
+    self._redirect_trailing_slash = Maybe::new(enabled.or(true))
+  }
+
   fn mut route(method: Str, path: Str, handler: Handler) {
     register_route(self, method, path, [], false, handler)
   }
@@ -1110,6 +1122,7 @@ impl App {
         compression: compression_settings(self._compression),
         security: security_settings(self._security),
         cross_origin: cross_origin_settings(self._cross_origin),
+        redirect_trailing_slash: self._redirect_trailing_slash.or(true),
       },
       request,
     )
@@ -1206,6 +1219,7 @@ private fn snapshot_app(app: App) App {
     _compression: app._compression,
     _security: app._security,
     _cross_origin: app._cross_origin,
+    _redirect_trailing_slash: app._redirect_trailing_slash,
   }
 }
 
@@ -1928,7 +1942,14 @@ private fn handle_safely(
   let trace = &mut PanicTrace{completed: false, stack: ""}
   match unsafe {
     trace_panics(trace, fn() {
-      handle_request(middleware_handlers, routes, fallback_handlers, options.cross_origin, request)
+      handle_request(
+        middleware_handlers,
+        routes,
+        fallback_handlers,
+        options.cross_origin,
+        options.redirect_trailing_slash,
+        request,
+      )
     })
   } {
     ok(response) => response,
@@ -1947,15 +1968,16 @@ private fn handle_safely(
   }
 }
 
-private fn handle_request(
-  middleware_handlers: [Middleware],
-  routes: [Route],
-  fallback_handlers: FallbackHandlers,
-  cross_origin: CrossOrigin?,
-  request: Request,
-) Response {
-  mut request = request
-  let response = &mut Response::new()
+private struct RouteSelection {
+  index: Int,
+  params: [Str: Str],
+  path_found: Bool,
+  allowed_methods: [Str],
+}
+
+// The most specific route for `method` at `path`, with `HEAD` falling back
+// to `GET`, and every method whose routes match the path.
+private fn select_route(routes: [Route], method: Str, path: Str) RouteSelection {
   mut route_index = -1
   mut route_params: [Str: Str] = [:]
   mut get_route_index = -1
@@ -1963,8 +1985,7 @@ private fn handle_request(
   mut candidate_index = 0
   mut path_found = false
   mut allowed_methods: [Str] = []
-  let method = request.method
-  let path_segments = strings::Split(request.path, "/")
+  let path_segments = strings::Split(path, "/")
 
   for route in routes {
     let matched = match_route(route.segments, path_segments)
@@ -1989,6 +2010,64 @@ private fn handle_request(
   if list_contains(allowed_methods, "GET") {
     allowed_methods = append_unique(allowed_methods, "HEAD")
   }
+  RouteSelection{
+    index: route_index,
+    params: route_params,
+    path_found: path_found,
+    allowed_methods: allowed_methods,
+  }
+}
+
+// `path` with its trailing slash added or removed. None for the root and
+// for any result that would not be a local path, such as `//host`.
+private fn toggle_trailing_slash(path: Str) Str? {
+  let toggled = match strings::HasSuffix(path, "/") {
+    true => strings::TrimSuffix(path, "/"),
+    false => "{path}/",
+  }
+  match path == "/" or not strings::HasPrefix(path, "/") {
+    true => Maybe::new(),
+    false => local_path(toggled),
+  }
+}
+
+// The redirect for a request that matched no route, when the other
+// trailing-slash form of its path has a route for its method.
+private fn trailing_slash_redirect(routes: [Route], request: Request) Handler? {
+  match toggle_trailing_slash(request.path) {
+    toggled => {
+      match select_route(routes, request.method, toggled).index >= 0 {
+        true => {
+          let escaped = &mut url::URL{}
+          escaped.Path = toggled
+          let location = match request.raw_query {
+            "" => escaped.EscapedPath(),
+            query => "{escaped.EscapedPath()}?{query}",
+          }
+          Maybe::new(fn(request: Request, response: &mut Response) {
+            response.redirect(location, status: 308)
+          })
+        },
+        false => Maybe::new(),
+      }
+    },
+    _ => Maybe::new(),
+  }
+}
+
+private fn handle_request(
+  middleware_handlers: [Middleware],
+  routes: [Route],
+  fallback_handlers: FallbackHandlers,
+  cross_origin: CrossOrigin?,
+  redirect_trailing_slash: Bool,
+  request: Request,
+) Response {
+  mut request = request
+  let response = &mut Response::new()
+  let selection = select_route(routes, request.method, request.path)
+  let route_index = selection.index
+  let route_params = selection.params
 
   mut selected_handler: Handler? = Maybe::new()
   let selected_middleware = &mut copy_middleware(middleware_handlers)
@@ -1998,12 +2077,20 @@ private fn handle_request(
     for middleware in matched_route.middleware_handlers {
       selected_middleware.push(middleware)
     }
-  } else if path_found {
+  } else if selection.path_found {
+    mut allowed_methods = selection.allowed_methods
     response.status = 405
     response.headers.set("Allow", strings::Join(&mut allowed_methods, ", "))
     selected_handler = fallback_handlers.method_not_allowed
   } else {
-    selected_handler = fallback_handlers.not_found
+    let redirect = match redirect_trailing_slash {
+      true => trailing_slash_redirect(routes, request),
+      false => Maybe::new(),
+    }
+    selected_handler = match redirect {
+      handler => Maybe::new(handler),
+      _ => fallback_handlers.not_found,
+    }
   }
 
   mut exempt = false

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted. Routing amended by [0009](./0009-redirect-trailing-slashes.md): a path that matches no route redirects to its other trailing-slash form when that form has a route.
 
 ## Context
 

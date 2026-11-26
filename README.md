@@ -10,6 +10,7 @@ The package root provides Dram's HTTP foundation:
 - immutable requests carrying Go-compatible contexts and lazily decoded query parameters;
 - distinct route handlers and one-shot middleware `Next` capabilities;
 - static, `:name`, and final-segment `*name` routes, nested route groups, and customizable 404/405 responses;
+- redirects between `/path` and `/path/` to whichever form is registered;
 - in-memory `App.handle(Request)` dispatch;
 - buffered text and byte responses plus deferred server-sent event streams;
 - cookie reading and writing with safe defaults and local-by-default redirects;
@@ -122,7 +123,7 @@ app.get("/files/*path", fn(request, response) {
 })
 ```
 
-The captured value includes its leading slash, so `/files/images/logo.png` produces `"/images/logo.png"`. `/files/*path` matches `/files/` with `"/"`, but does not match `/files`. Catch-all routes reject overlapping same-method static, parameter, and catch-all routes.
+The captured value includes its leading slash, so `/files/images/logo.png` produces `"/images/logo.png"`. `/files/*path` matches `/files/` with `"/"`. It does not match `/files`, which redirects to `/files/` (see [trailing slashes](#trailing-slashes)). Catch-all routes reject overlapping same-method static, parameter, and catch-all routes.
 
 Groups compose static path prefixes and middleware:
 
@@ -151,6 +152,23 @@ app.method_not_allowed(fn(request, response) {
 ```
 
 Global middleware wraps fallback handlers. Group middleware does not run because no group route was selected. The method-not-allowed handler receives a response already set to 405 with its generated `Allow` header.
+
+### Trailing slashes
+
+Paths match exactly, so `/about` and `/about/` are different paths. Register the one you want as canonical. A request for the other form redirects to it:
+
+```ard
+app.get("/about", about)    // GET /about/ -> 308, Location: /about
+app.get("/posts/", posts)   // GET /posts  -> 308, Location: /posts/
+```
+
+A request redirects when no route matches its path for any method and the other form has a route for its method (`HEAD` uses `GET`'s). The redirect is a `308 Permanent Redirect`, which keeps the method and body, and the query string is kept. Global middleware wraps it, like the fallback handlers, and it replaces the not-found handler for that request. Paths registered in both forms are served in both, a path with routes for other methods still gets 405, and `/` never redirects. A target that wouldn't be a local path, such as `//host`, is never redirected.
+
+Groups and parameters follow the same rule: a group's `/` route at `/blog/` redirects `/blog`, and `/users/:id` redirects `/users/42/`. Turn redirects off for exact matching only:
+
+```ard
+app.redirect_trailing_slash(enabled: false)
+```
 
 ## Query parameters
 
@@ -385,6 +403,6 @@ ard build examples/ai-chat/main.ard --out /tmp/dram-ai-chat
 
 ## Current limits
 
-Routing supports static paths, single-segment and catch-all parameters, and static-prefix route groups. Ordinary responses and all request bodies are buffered; oversized bodies return 413 and other body decoding failures return 400. SSE is the only streaming delivery mode. Informational statuses and successful CONNECT responses are not supported as final buffered responses. Panic recovery uses Ard's `unsafe` boundary and returns a generic 500 before commitment. Generic streams, files, WebSockets, automatic SSE heartbeats, and detached request contexts are not exposed yet.
+Routing supports static paths, single-segment and catch-all parameters, static-prefix route groups, and trailing-slash redirects. Ordinary responses and all request bodies are buffered; oversized bodies return 413 and other body decoding failures return 400. SSE is the only streaming delivery mode. Informational statuses and successful CONNECT responses are not supported as final buffered responses. Panic recovery uses Ard's `unsafe` boundary and returns a generic 500 before commitment. Generic streams, files, WebSockets, automatic SSE heartbeats, and detached request contexts are not exposed yet.
 
 Architecture decisions live in [`docs/`](./docs/).

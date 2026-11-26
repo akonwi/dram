@@ -1,0 +1,224 @@
+use ard/testing
+
+use dram/dram
+use go:net/http
+use go:net/http/httptest
+use go:strings
+
+fn location(response: dram::Response) Str {
+  response.headers.get("Location").or("")
+}
+
+fn redirects(response: dram::Response, target: Str) Bool {
+  response.status == 308 and location(response) == target and response.body.size() == 0
+}
+
+fn ok(request: dram::Request, response: &mut dram::Response) {
+  response.text(200, "{request.method} {request.path}")
+}
+
+test fn missing_slash_form_redirects_to_the_registered_form() Void!Str {
+  let app = &mut dram::App::new()
+  app.get("/about", ok)
+  app.get("/posts/", ok)
+
+  try testing::assert(
+    redirects(app.handle(dram::Request::new("GET", "/about/")), "/about"),
+    "/about/ did not redirect",
+  )
+  try testing::assert(
+    redirects(app.handle(dram::Request::new("GET", "/posts")), "/posts/"),
+    "/posts did not redirect",
+  )
+  let exact = app.handle(dram::Request::new("GET", "/about"))
+  try testing::assert(
+    exact.status == 200 and Str::from(exact.body) == "GET /about",
+    "exact route changed",
+  )
+  let slashed = app.handle(dram::Request::new("GET", "/posts/"))
+  try testing::assert(slashed.status == 200, "slashed route changed")
+  testing::pass()
+}
+
+test fn redirect_keeps_the_query_and_escapes_the_path() Void!Str {
+  let app = &mut dram::App::new()
+  app.get("/search", ok)
+  app.get("/my page", ok)
+
+  try testing::assert(
+    redirects(app.handle(dram::Request::new("GET", "/search/?q=a+b&tag=x")), "/search?q=a+b&tag=x"),
+    "query was not kept",
+  )
+  try testing::assert(
+    redirects(app.handle(dram::Request::new("GET", "/my%20page/")), "/my%20page"),
+    "path was not escaped",
+  )
+  testing::pass()
+}
+
+test fn both_registered_forms_are_served_without_redirects() Void!Str {
+  let app = &mut dram::App::new()
+  app.get("/x", fn(request, response) {
+    response.text(200, "plain")
+  })
+  app.get("/x/", fn(request, response) {
+    response.text(200, "slashed")
+  })
+
+  try testing::assert(
+    Str::from(app.handle(dram::Request::new("GET", "/x")).body) == "plain",
+    "/x changed",
+  )
+  try testing::assert(
+    Str::from(app.handle(dram::Request::new("GET", "/x/")).body) == "slashed",
+    "/x/ changed",
+  )
+  testing::pass()
+}
+
+test fn redirects_follow_the_request_method() Void!Str {
+  let app = &mut dram::App::new()
+  app.get("/page", ok)
+  app.post("/submit", ok)
+  app.get("/both/", ok)
+  app.post("/both", ok)
+
+  try testing::assert(
+    redirects(app.handle(dram::Request::new("HEAD", "/page/")), "/page"),
+    "HEAD did not use GET",
+  )
+  try testing::assert(
+    redirects(app.handle(dram::Request::new("POST", "/submit/")), "/submit"),
+    "POST did not redirect",
+  )
+  try testing::assert(
+    app.handle(dram::Request::new("GET", "/submit/")).status == 404,
+    "redirected to a method without a route",
+  )
+  try testing::assert(
+    app.handle(dram::Request::new("POST", "/page/")).status == 404,
+    "redirected POST to a GET route",
+  )
+
+  let wrong_method = app.handle(dram::Request::new("POST", "/both/"))
+  try testing::assert(wrong_method.status == 405, "a path with routes for other methods redirected")
+  try testing::assert(location(wrong_method) == "", "405 had a Location")
+  testing::pass()
+}
+
+test fn params_catch_alls_and_groups_redirect() Void!Str {
+  let app = &mut dram::App::new()
+  app.get("/users/:id", ok)
+  app.get("/files/*path", ok)
+  let blog = &mut app.group("/blog")
+  blog.get("/", ok)
+  blog.get("/:slug/", ok)
+
+  try testing::assert(
+    redirects(app.handle(dram::Request::new("GET", "/users/42/")), "/users/42"),
+    "param route",
+  )
+  try testing::assert(
+    app.handle(dram::Request::new("GET", "/users/")).status == 404,
+    "empty param matched",
+  )
+  try testing::assert(
+    redirects(app.handle(dram::Request::new("GET", "/files")), "/files/"),
+    "catch-all prefix",
+  )
+  try testing::assert(redirects(app.handle(dram::Request::new("GET", "/blog")), "/blog/"), "group root")
+  try testing::assert(
+    redirects(app.handle(dram::Request::new("GET", "/blog/hello")), "/blog/hello/"),
+    "group param",
+  )
+  testing::pass()
+}
+
+test fn root_and_off_site_targets_never_redirect() Void!Str {
+  let only_root = &mut dram::App::new()
+  only_root.get("/", ok)
+  only_root.get("//evil.example", ok)
+  only_root.get("/\\evil.example/", ok)
+
+  try testing::assert(only_root.handle(dram::Request::new("GET", "/")).status == 200, "root changed")
+  let open = only_root.handle(dram::Request::new("GET", "//evil.example/"))
+  try testing::assert(open.status == 404 and location(open) == "", "redirected off site")
+  let backslash = only_root.handle(dram::Request::new("GET", "/%5Cevil.example"))
+  try testing::assert(
+    backslash.status == 404 and location(backslash) == "",
+    "redirected to a backslash path",
+  )
+  try testing::assert(
+    redirects(only_root.handle(dram::Request::new("GET", "//")), "/"),
+    "double slash root",
+  )
+  testing::pass()
+}
+
+test fn global_middleware_wraps_the_redirect_and_not_found_is_skipped() Void!Str {
+  let app = &mut dram::App::new()
+  app.use(fn(request: dram::Request, response: &mut dram::Response, next: dram::Next) {
+    response.headers.set("X-Global", "yes")
+    next.run(request, response)
+  })
+  app.not_found(fn(request, response) {
+    response.text(404, "custom")
+  })
+  let group = &mut app.group("/g")
+  group.use(fn(request: dram::Request, response: &mut dram::Response, next: dram::Next) {
+    response.headers.set("X-Group", "yes")
+    next.run(request, response)
+  })
+  group.get("/page", ok)
+
+  let response = app.handle(dram::Request::new("GET", "/g/page/"))
+  try testing::assert(redirects(response, "/g/page"), "group route did not redirect")
+  try testing::assert(response.headers.get("X-Global").or("") == "yes", "global middleware skipped")
+  try testing::assert(response.headers.get("X-Group").is_none(), "group middleware ran")
+  try testing::assert(
+    response.headers.get("X-Content-Type-Options").or("") == "nosniff",
+    "security headers missing",
+  )
+  let missing = app.handle(dram::Request::new("GET", "/nothing/"))
+  try testing::assert(Str::from(missing.body) == "custom", "not_found changed")
+  testing::pass()
+}
+
+test fn cross_origin_protection_applies_to_the_redirect() Void!Str {
+  let app = &mut dram::App::new()
+  app.post("/form", ok)
+  let request = &mut dram::Request::new("POST", "/form/")
+  request.host = Maybe::new("app.example")
+  request.headers.set("Sec-Fetch-Site", "cross-site")
+  try testing::assert(app.handle(request.*).status == 403, "cross-site POST was redirected")
+  testing::pass()
+}
+
+test fn redirects_can_be_turned_off() Void!Str {
+  let app = &mut dram::App::new()
+  app.get("/about", ok)
+  app.redirect_trailing_slash(enabled: false)
+  try testing::assert(app.handle(dram::Request::new("GET", "/about/")).status == 404, "redirect still on")
+  app.redirect_trailing_slash()
+  try testing::assert(
+    redirects(app.handle(dram::Request::new("GET", "/about/")), "/about"),
+    "redirect not back on",
+  )
+  testing::pass()
+}
+
+test fn network_requests_redirect_and_head_has_no_body() Void!Str {
+  let app = &mut dram::App::new()
+  app.get("/docs/", ok)
+  let handler: http::Handler = app.*
+
+  let recorder = httptest::NewRecorder()
+  handler.ServeHTTP(recorder, httptest::NewRequest("GET", "/docs?page=2", strings::NewReader("")))
+  try testing::assert(recorder.Code == 308, "network request did not redirect")
+  try testing::assert(recorder.Header().Get("Location") == "/docs/?page=2", "network Location changed")
+
+  let head = httptest::NewRecorder()
+  handler.ServeHTTP(head, httptest::NewRequest("HEAD", "/docs", strings::NewReader("")))
+  try testing::assert(head.Code == 308 and head.Body.Len() == 0, "HEAD redirect had a body")
+  testing::pass()
+}
