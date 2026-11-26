@@ -2018,38 +2018,57 @@ private fn select_route(routes: [Route], method: Str, path: Str) RouteSelection 
   }
 }
 
-// `path` with its trailing slash added or removed. None for the root and
-// for any result that would not be a local path, such as `//host`.
+// `path` with its trailing slash added or removed. None for the root, for
+// paths with `.` or `..` segments (clients would resolve them elsewhere),
+// and for any result that would not be a local path, such as `//host`.
 private fn toggle_trailing_slash(path: Str) Str? {
   let toggled = match strings::HasSuffix(path, "/") {
     true => strings::TrimSuffix(path, "/"),
     false => "{path}/",
   }
-  match path == "/" or not strings::HasPrefix(path, "/") {
+  mut dot_segment = false
+  for segment in strings::Split(path, "/") {
+    if segment == "." or segment == ".." {
+      dot_segment = true
+    }
+  }
+  match path == "/" or dot_segment or (not strings::HasPrefix(path, "/")) {
     true => Maybe::new(),
     false => local_path(toggled),
   }
 }
 
 // The redirect for a request that matched no route, when the other
-// trailing-slash form of its path has a route for its method.
+// trailing-slash form of its path has a route for its method. The query is
+// kept, with `\` and `#` escaped so it survives as one local query.
 private fn trailing_slash_redirect(routes: [Route], request: Request) Handler? {
-  match toggle_trailing_slash(request.path) {
+  let target = match toggle_trailing_slash(request.path) {
     toggled => {
       match select_route(routes, request.method, toggled).index >= 0 {
         true => {
           let escaped = &mut url::URL{}
           escaped.Path = toggled
-          let location = match request.raw_query {
+          let query = strings::ReplaceAll(
+            strings::ReplaceAll(request.raw_query, "\\", "%5C"),
+            "#",
+            "%23",
+          )
+          let location = match query {
             "" => escaped.EscapedPath(),
-            query => "{escaped.EscapedPath()}?{query}",
+            _ => "{escaped.EscapedPath()}?{query}",
           }
-          Maybe::new(fn(request: Request, response: &mut Response) {
-            response.redirect(location, status: 308)
-          })
+          local_path(location)
         },
         false => Maybe::new(),
       }
+    },
+    _ => Maybe::new(),
+  }
+  match target {
+    location => {
+      Maybe::new(fn(request: Request, response: &mut Response) {
+        response.redirect(location, status: 308)
+      })
     },
     _ => Maybe::new(),
   }

@@ -222,3 +222,49 @@ test fn network_requests_redirect_and_head_has_no_body() Void!Str {
   try testing::assert(head.Code == 308 and head.Body.Len() == 0, "HEAD redirect had a body")
   testing::pass()
 }
+
+test fn odd_queries_stay_in_the_query() Void!Str {
+  let app = &mut dram::App::new()
+  app.get("/docs/", ok)
+  let handler: http::Handler = app.*
+
+  let backslash = httptest::NewRecorder()
+  handler.ServeHTTP(
+    backslash,
+    httptest::NewRequest("GET", "/docs?x=\\evil", strings::NewReader("")),
+  )
+  try testing::assert(backslash.Code == 308, "backslash query did not redirect: {backslash.Code}")
+  try testing::assert(
+    backslash.Header().Get("Location") == "/docs/?x=%5Cevil",
+    "backslash query not escaped",
+  )
+
+  let hash = httptest::NewRecorder()
+  handler.ServeHTTP(hash, httptest::NewRequest("GET", "/docs?x=a#b", strings::NewReader("")))
+  try testing::assert(hash.Code == 308, "hash query did not redirect: {hash.Code}")
+  try testing::assert(hash.Header().Get("Location") == "/docs/?x=a%23b", "hash became a fragment")
+  testing::pass()
+}
+
+test fn dot_segments_never_redirect() Void!Str {
+  let app = &mut dram::App::new()
+  app.get("/:a/:b", ok)
+  app.get("/c/:d/", ok)
+  try testing::assert(
+    app.handle(dram::Request::new("GET", "/foo/../")).status == 404,
+    "redirected to /foo/..",
+  )
+  try testing::assert(
+    location(app.handle(dram::Request::new("GET", "/c/."))) == "",
+    "redirected to /c/./",
+  )
+  try testing::assert(
+    redirects(app.handle(dram::Request::new("GET", "/foo/bar/")), "/foo/bar"),
+    "plain params",
+  )
+  try testing::assert(
+    redirects(app.handle(dram::Request::new("GET", "/foo/.x/")), "/foo/.x"),
+    "dotted name",
+  )
+  testing::pass()
+}

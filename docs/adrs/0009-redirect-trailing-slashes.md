@@ -38,7 +38,7 @@ Each route's registered form is canonical, so one application can use `/posts/` 
 - **Exact matches win.** A path registered in both forms is served in both, and nothing redirects. A path with routes only for other methods still gets its 405, not a redirect.
 - **Params, catch-alls, and groups need nothing special.** `/users/:id` redirects `/users/42/` to `/users/42`. `/files/*path` redirects `/files` to `/files/`. A group's `/` route at `/blog/` redirects `/blog`. An empty segment still doesn't match a parameter, so `/users/` stays a 404 unless `/users` is a route.
 - **The root never redirects.** `/` has no form without the slash.
-- **Targets stay on the site.** The target path must pass `dram::local_path`, so a path such as `//evil.example/` is never redirected to `//evil.example`, and paths with backslashes or control characters are never redirected. The `Location` is the target path percent-escaped, followed by the request's raw query string.
+- **Targets stay on the site.** The target path must pass `dram::local_path`, so a path such as `//evil.example/` is never redirected to `//evil.example`, and paths with backslashes or control characters are never redirected. Paths with `.` or `..` segments are never redirected either, because clients resolve those segments and would land somewhere other than the route that was found. The `Location` is the target path percent-escaped, followed by the request's raw query string with any `\` and `#` escaped, so the query stays one local query.
 
 ### The response
 

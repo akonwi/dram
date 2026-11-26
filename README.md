@@ -162,7 +162,7 @@ app.get("/about", about)    // GET /about/ -> 308, Location: /about
 app.get("/posts/", posts)   // GET /posts  -> 308, Location: /posts/
 ```
 
-A request redirects when no route matches its path for any method and the other form has a route for its method (`HEAD` uses `GET`'s). The redirect is a `308 Permanent Redirect`, which keeps the method and body, and the query string is kept. Global middleware wraps it, like the fallback handlers, and it replaces the not-found handler for that request. Paths registered in both forms are served in both, a path with routes for other methods still gets 405, and `/` never redirects. A target that wouldn't be a local path, such as `//host`, is never redirected.
+A request redirects when no route matches its path for any method and the other form has a route for its method (`HEAD` uses `GET`'s). The redirect is a `308 Permanent Redirect`, which keeps the method and body, and the query string is kept. Global middleware wraps it, like the fallback handlers, and it replaces the not-found handler for that request. Paths registered in both forms are served in both, a path with routes for other methods still gets 405, and `/` never redirects. Paths whose other form wouldn't be a local path, such as `//host`, or that contain `.` or `..` segments, are never redirected.
 
 Groups and parameters follow the same rule: a group's `/` route at `/blog/` redirects `/blog`, and `/users/:id` redirects `/users/42/`. Turn redirects off for exact matching only:
 
