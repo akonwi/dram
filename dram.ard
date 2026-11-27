@@ -950,11 +950,9 @@ impl http::Handler for App {
 }
 
 fn App::new() App {
-  let middleware_handlers: [Middleware] = []
-  let routes: [Route] = []
   App{
-    middleware_handlers: middleware_handlers,
-    routes: routes,
+    middleware_handlers: [],
+    routes: [],
     max_body_bytes: DEFAULT_MAX_BODY_BYTES,
     _not_found_handler: Maybe::new(),
     _method_not_allowed_handler: Maybe::new(),
