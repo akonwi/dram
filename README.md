@@ -1,7 +1,7 @@
 # Dram
 
 Dram is an HTTP server framework for [Ard](https://github.com/akonwi/ard).
-Current main requires Ard 0.48.0 or newer.
+Current main requires Ard 0.49.1 or newer.
 
 ## Current package
 
